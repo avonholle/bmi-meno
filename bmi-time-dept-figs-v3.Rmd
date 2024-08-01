@@ -1,0 +1,599 @@
+---
+title: "BMI HR by menopause status."
+date: '2022-08-05'
+output: 
+  html_document:
+    toc: true # table of content true
+    toc_depth: 3  # upto three depths of headings (specified by #, ## and ###)
+    number_sections: true  ## if you want number sections at each table header
+    theme: united  # many options for theme, this one is my favorite.
+    highlight: tango  # specifies the syntax highlighting style
+editor_options: 
+  chunk_output_type: console
+---
+
+Note: this figures and models are from the sample-bmi-time-dept.Rmd file.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      eval=T) #only set to eval=T for new data,otherwise takes time to run
+```
+
+
+```{r, eval=T, include=F}
+
+library(ggplot2)
+theme_set(theme_bw())
+require(cowplot)
+require(scales)
+require(pammtools)
+
+```
+
+
+```{r, eval=T}
+# for some reason, R on slurm is saving the environment from previous run. Need to remove all objects from prior runs to clear up memory so I can run this script.
+rm(list=ls()) 
+gc()
+
+```
+
+
+```{r}
+
+Set1 <- RColorBrewer::brewer.pal(9, "Set1") # note: no RColorBrewer installed on server. Used values I got from local drive
+#Set1 =  c("#E41A1C", "#377EB8", "#4DAF4A", "#984EA3", "#FF7F00", "#FFFF33", "#A65628", "#F781BF")
+
+```
+
+```{r, eval=T}
+
+
+# Files created in sample-bmi-time-dept-analyses2.Rmd
+# each object in bmi-time2.RData has the following:
+
+load(file="bmi-time2.RData") # nat.1, ov.1, pre.1, surg.1 objects from sample-bmi-time-dept-analyses2.Rmd 
+
+#load(file="bmidat-pamm.RData") # df.ped from sample-bmi-time-dept-datahandling.Rmd
+
+sort( sapply(ls(),function(x){object.size(get(x))})) 
+
+pre.1[[2]] 
+pre.1[[4]]
+pre.1[[5]]
+
+data.frame(nat.1[[7]])
+
+```
+
+
+```{r, eval=T}
+
+sapply(pre.1, object.size)
+
+term.df.update = surg.1[[7]]
+term.df2.update = surg.1[[8]]
+
+head(data.frame(term.df.update))
+
+# make plot
+gg_tv.update = ggplot(term.df.update, 
+                      aes(x = tend, y = exp(fit), col="Constant")) +
+  geom_line() +
+   geom_ribbon(aes(ymin = exp(ci_lower), ymax = exp(ci_upper),
+                   col="Constant"),
+               fill = "black", 
+               alpha = 0.1) +
+    geom_line(aes(y = exp(pam.l.fit),
+                  col="Linear")) +
+    geom_step(data=term.df2.update, 
+              aes(x=tend, y=exp(fit),
+                  col = "Spline")) +
+    geom_stepribbon(data=term.df2.update, 
+                    aes(ymin = exp(ci_lower),
+                        ymax = exp(ci_upper),
+                        col="Spline"),
+                    fill = Set1[[2]], 
+                    alpha = 0.1) +
+  scale_colour_manual(
+    name = "Method",
+    values = c("Constant"="black",
+               "Linear" = Set1[[1]],
+               "Spline" = Set1[[2]])) + # https://stackoverflow.com/questions/10349206/add-legend-to-ggplot2-line-plot
+    xlab("Age (years)") + ylab("BMI breast cancer HR") +
+  theme_bw(base_size=15)
+
+
+gg_tv.update
+
+```
+
+
+```{r, eval=T, fig.width=10, fig.height=4}
+
+# use code from U:\projects\bmi-menopause\scripts-update\figures-slides.Rmd
+
+# this figure has data with fixed BMI covariate (at study entry)
+
+legend = get_legend(pre.1[[4]] + theme(legend.position = "bottom",
+                                  legend.text=element_text(size=15),
+                                  legend.title=element_text(size=15)))
+
+p.pre. = pre.1[[4]] + theme_bw(base_size=15) + 
+        theme(legend.position = "none",
+              plot.title = element_text(size = 13, face = "bold"),
+              panel.grid.minor = element_blank(),
+              axis.title.y = element_text(size = 10)) + 
+  scale_y_continuous(limits=c(-0.09, 0.06),
+                     breaks=pretty_breaks(10)) +
+  scale_x_continuous(limits=c(44,55),
+                     breaks = c(44, seq(45,54,2), 55)) +
+  ylab(expression(paste("Change in breast cancer HR per 5-unit kg /  ", m^2))) +
+  xlab("Age (years)") + ggtitle("Premenopausal") 
+
+p.pre.
+
+p.nat. = nat.1[[4]] + theme_bw(base_size=15) + 
+        theme(legend.position = "none",
+              plot.title = element_text(size = 13, face = "bold"),
+              panel.grid.minor = element_blank()) + 
+  scale_y_continuous(limits=c(-0.09, 0.06),
+                      breaks=pretty_breaks(15)) +
+  scale_x_continuous(limits=c(44,55),
+                     breaks = c(44, seq(45,54,2), 55)) +
+  ylab(NULL) + 
+  xlab("Age (years)") + ggtitle("Post-Natural Menopause") 
+
+p.ov. = ov.1[[4]] + theme_bw(base_size=15) + 
+        theme(legend.position = "none",
+              plot.title = element_text(size = 13, face = "bold"),
+              panel.grid.minor = element_blank()) + 
+  scale_y_continuous(limits=c(-0.09, 0.06),
+                      breaks=pretty_breaks(10)) +
+  scale_x_continuous(limits=c(44,55),
+                     breaks = c(44, seq(45,54,2), 55)) +
+  ylab(NULL) + 
+  xlab("Age (years)") + ggtitle("Post-Ovarian Menopause") 
+
+pg0 = plot_grid(  plot_grid(p.pre., p.nat., p.ov., 
+                      nrow=1,
+                      rel_widths = c(0.35, 0.31, 0.31)), 
+            legend, rel_heights = c(1, .1),
+            ncol=1)
+pg0
+
+```
+
+
+```{r, eval=T}
+
+ggsave(filename = "Original.png",
+       width = 10,
+       height=4)
+
+```
+
+
+
+```{r, eval=T, fig.width=10, fig.height=4}
+
+# use code from U:\projects\bmi-menopause\scripts-update\figures-slides.Rmd
+
+# this figure has data with time-dept BMI covariate (at study entry)
+
+legend = get_legend(pre.1[[5]] + theme(legend.position = "bottom",
+                                  legend.text=element_text(size=15),
+                                  legend.title=element_text(size=15)))
+
+pre.1[[5]]
+
+ymin. = 0.6
+ymax. = 1.5
+
+
+p.pre. = pre.1[[5]] + theme_bw(base_size=15) + 
+        theme(legend.position = "none",
+              plot.title = element_text(size = 13, face = "bold"),
+              panel.grid.minor = element_blank(),
+              axis.title.y = element_text(size = 10)) + 
+  geom_hline(yintercept=1, lty=3) +
+  scale_y_continuous(limits=c(ymin.,ymax.),
+                     breaks=pretty_breaks(10)) +
+  scale_x_continuous(limits=c(45,55),
+                     breaks = c(seq(45,54,2), 55)) +
+  ylab(expression(paste("BMI breast cancer hazard ratio (age)"))) +
+  xlab("Age (years)") + ggtitle("Premenopausal") 
+
+p.pre.
+
+p.nat. = nat.1[[5]] + theme_bw(base_size=15) + 
+        theme(legend.position = "none",
+              plot.title = element_text(size = 13, face = "bold"),
+              panel.grid.minor = element_blank()) + 
+  scale_y_continuous(limits=c(ymin.,ymax.),
+                      breaks=pretty_breaks(10)) +
+  geom_hline(yintercept=1, lty=3) +
+  scale_x_continuous(limits=c(45,55),
+                     breaks = c(seq(45,54,2), 55)) +
+  ylab(NULL) + 
+  xlab("Age (years)") + ggtitle("Post-Natural Menopause") 
+p.nat.
+
+p.ov. = ov.1[[5]] + theme_bw(base_size=15) + 
+        theme(legend.position = "none",
+              plot.title = element_text(size = 13, face = "bold"),
+              panel.grid.minor = element_blank()) + 
+  geom_hline(yintercept=1, lty=3) +
+  scale_y_continuous(limits=c(ymin., ymax.),
+                      breaks=pretty_breaks(10)) +
+  scale_x_continuous(limits=c(45,55),
+                     breaks = c(seq(45,54,2), 55)) +
+  ylab(NULL) + 
+  xlab("Age (years)") + ggtitle("Post-Ovarian Menopause") 
+p.ov.
+
+
+p.surg. = surg.1[[5]] + theme_bw(base_size=15) + 
+        theme(legend.position = "none",
+              plot.title = element_text(size = 13, face = "bold"),
+              panel.grid.minor = element_blank()) + 
+  geom_hline(yintercept=1, lty=3) +
+  scale_y_continuous(limits=c(ymin., ymax.),
+                      breaks=pretty_breaks(10)) +
+  scale_x_continuous(limits=c(45,55),
+                     breaks = c(seq(45,54,2), 55)) +
+  ylab(NULL) + 
+  xlab("Age (years)") + ggtitle("Hysterectomy without \nbilateral oophorectomy") 
+p.surg.
+
+pg0.update = plot_grid(plot_grid(p.pre., p.nat., p.ov., p.surg.,
+                                 nrow=1,
+                                 rel_widths = c(0.24, 0.22, 0.22, 0.22)), 
+                       legend, 
+                       rel_heights = c(1, .1),
+            ncol=1)
+pg0.update
+
+```
+
+
+
+```{r, eval=T}
+
+ggsave(filename = "Updated.png",
+       width = 12,
+       height=5)
+
+```
+
+
+```{r, eval=T}
+
+pg0.update2 = plot_grid(plot_grid(p.pre., p.nat.,
+                                 nrow=1,
+                                 rel_widths = c(0.24, 0.22)),
+                       legend,
+                       rel_heights = c(1, .1),
+                       ncol=1)
+
+pg0.update2
+```
+
+```{r, eval=T, include=F}
+
+# These figures that follow are for UNCC job talk slides
+nat.update = ggplot(nat.1[[7]], 
+                      aes(x = tend, y = exp(fit), col="Constant")) +
+  geom_line() +
+   geom_ribbon(aes(ymin = exp(ci_lower), ymax = exp(ci_upper),
+                   col="Constant"),
+               fill = Set1[[1]], 
+               alpha = 0.1) +
+    geom_line(aes(y = exp(pam.l.fit),
+                  col="Linear")) +
+    geom_step(data = nat.1[[8]], 
+              aes(x=tend, y=exp(fit),
+                  col = "Spline")) +
+    geom_stepribbon(data = nat.1[[8]], 
+                    aes(ymin = exp(ci_lower),
+                        ymax = exp(ci_upper),
+                        col="Spline"),
+                    fill = Set1[[3]], 
+                    alpha = 0.1) + 
+  geom_hline(yintercept=1, lty=3) +
+  scale_y_continuous(limits=c(0.7, 1.25),
+                      breaks=pretty_breaks(10)) +
+  scale_x_continuous(limits=c(45,55),
+                     breaks = c(seq(45,54,2), 55)) +
+  scale_colour_manual(
+    name = "Method",
+    values = c("Constant"=Set1[[1]],
+               "Linear" = Set1[[2]],
+               "Spline" = Set1[[3]])) + # https://stackoverflow.com/questions/10349206/add-legend-to-ggplot2-line-plot
+  xlab("Age (years)") +
+  ylab(expression(paste("BMI breast cancer hazard ratio (age)"))) +
+  theme_bw(base_size=15)
+
+
+nat.update
+
+```
+
+```{r, eval=T}
+
+# all methods in one plot
+ggsave(filename = "Updated-v3-natural.png",
+       width = 6,
+       height=5)
+
+```
+
+```{r, eval=T}
+
+# show natural menopause with constant HR only
+
+nat.update.constant = ggplot(nat.1[[7]], 
+                      aes(x = tend, y = exp(fit), col="Constant")) +
+  geom_line() +
+   geom_ribbon(aes(ymin = exp(ci_lower), ymax = exp(ci_upper)),
+               fill = Set1[[1]], 
+               alpha = 0.1) +
+  xlab("Age (years)") + 
+  geom_hline(yintercept=1, lty=3) +
+  scale_y_continuous(limits=c(0.7, 1.25),
+                      breaks=pretty_breaks(10)) +
+  scale_x_continuous(limits=c(45,55),
+                     breaks = c(seq(45,54,2), 55)) +
+  ylab(expression(paste("BMI breast cancer hazard ratio (age)"))) +
+  scale_colour_manual(
+    name = "Method",
+    values = c("Constant"=Set1[[1]],
+               "Linear" = Set1[[2]],
+               "Spline" = Set1[[3]])) + # https://stackoverflow.com/questions/10349206/add-legend-to-ggplot2-line-plot
+  theme_bw(base_size=15)
+
+nat.update.constant
+
+```
+
+```{r, eval=T}
+
+ggsave(filename = "Updated-v3-natural-constant.png",
+       width = 6,
+       height=5)
+
+```
+
+
+```{r, eval=T}
+
+# show natural menopause with linear HR 
+
+nat.update.linear =  ggplot(nat.1[[7]], 
+                      aes(x = tend, y = exp(fit), col="Constant")) +
+  geom_line() +
+   geom_ribbon(aes(ymin = exp(ci_lower), ymax = exp(ci_upper),
+                   col="Constant"),
+               fill = Set1[[1]], 
+               alpha = 0.1) +
+    geom_line(aes(y = exp(pam.l.fit),
+                  col="Linear"),
+              size=2) +
+  geom_hline(yintercept=1, lty=3) +
+  scale_y_continuous(limits=c(0.7, 1.25),
+                      breaks=pretty_breaks(10)) +
+  scale_x_continuous(limits=c(45,55),
+                     breaks = c(seq(45,54,2), 55)) +
+  scale_colour_manual(
+    name = "Method",
+    values = c("Constant"=Set1[[1]],
+               "Linear" = Set1[[2]])) + # https://stackoverflow.com/questions/10349206/add-legend-to-ggplot2-line-plot
+  xlab("Age (years)") +
+  scale_colour_manual(
+    name = "Method",
+    values = c("Constant"=Set1[[1]],
+               "Linear" = Set1[[2]],
+               "Spline" = Set1[[3]])) + # https://stackoverflow.com/questions/10349206/add-legend-to-ggplot2-line-plot
+  ylab(expression(paste("BMI breast cancer hazard ratio (age)"))) +
+  theme_bw(base_size=15)
+  
+nat.update.linear
+
+```
+
+```{r, eval=T}
+
+ggsave(filename = "Updated-v3-natural-linear.png",
+       width = 6,
+       height=5)
+
+```
+
+```{r, eval=T}
+
+# spline only
+
+nat.update.spline = ggplot(nat.1[[8]], 
+                      aes(x = tend, y = exp(fit), col="Spline")) +
+  geom_step() +
+    geom_stepribbon(data=nat.1[[8]], 
+                    aes(ymin = exp(ci_lower),
+                        ymax = exp(ci_upper),
+                        col="Spline"),
+                    fill = Set1[[3]], 
+                    alpha = 0.1) + 
+  geom_hline(yintercept=1, lty=3) +
+  scale_y_continuous(limits=c(0.7, 1.25),
+                      breaks=pretty_breaks(10)) +
+  scale_x_continuous(limits=c(45,55),
+                     breaks = c(seq(45,54,2), 55)) + 
+  xlab("Age (years)") +
+  ylab(expression(paste("BMI breast cancer hazard ratio (age)"))) +
+  scale_colour_manual(
+    name = "Method",
+    values = c("Constant"=Set1[[1]],
+               "Linear" = Set1[[2]],
+               "Spline" = Set1[[3]])) + # https://stackoverflow.com/questions/10349206/add-legend-to-ggplot2-line-plot
+  theme_bw(base_size=15)
+
+nat.update.spline
+
+```
+
+```{r, eval=T}
+
+ggsave(filename = "Updated-v3-natural-spline.png",
+       width = 6,
+       height=5)
+
+```
+
+```{r}
+
+# Replicate natural menopause figure to see where constant HR is
+
+data.frame(nat.1[[7]])
+object.size(nat.1[[7]])
+object.size(nat.1[[5]])
+
+# https://stackoverflow.com/questions/57153428/r-plot-color-combinations-that-are-colorblind-accessible
+colorBlindBlack8  <- c("#000000", "#E69F00", "#56B4E9", "#009E73", 
+                       "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+Set1 = colorBlindBlack8
+
+term.df.update = nat.1[[7]]
+term.df2.update = nat.1[[8]]
+
+
+
+gg_tv.update = ggplot(term.df.update, 
+                      aes(x = tend, y = exp(fit), col="Constant")) +
+  geom_line() +
+    geom_line(aes(y = exp(pam.l.fit),
+                  col="Linear")) +
+   geom_ribbon(aes(ymin = exp(ci_lower), ymax = exp(ci_upper),
+                   col="Constant"),
+               fill = "black", 
+               alpha = 0.1) +
+    geom_step(data=term.df2.update, 
+              aes(x=tend, y=exp(fit),
+                  col = "Spline")) +
+    geom_stepribbon(data=term.df2.update, 
+                    aes(ymin = exp(ci_lower),
+                        ymax = exp(ci_upper),
+                        col="Spline"),
+                    fill = Set1[[3]], 
+                    alpha = 0.1) +
+  scale_colour_manual(
+    name = "Method",
+    values = c("Constant"=Set1[[1]],
+               "Linear" = Set1[[2]],
+               "Spline" = Set1[[3]])) + # https://stackoverflow.com/questions/10349206/add-legend-to-ggplot2-line-plot
+    xlab("Age (years)") + ylab("BMI breast cancer HR") +
+  theme_bw(base_size=15)
+
+gg_tv.update
+
+```
+
+# Tests for the models with time-dependent BMI covariates
+
+## Premenopausal 
+
+```{r}
+
+# chi-sq tests
+pre.1[[1]]
+
+# AIC
+pre.1[[9]]
+
+# original model with no bmi
+pre.1[[11]]
+# model with constant bmi
+pre.1[[12]]
+# model with linear bmi
+pre.1[[13]]
+# model with spline bmi
+pre.1[[14]]
+```
+
+## Natural
+
+```{r}
+
+# chi-sq tests
+nat.1[[1]]
+
+# AIC
+nat.1[[9]]
+
+# original model with no bmi
+nat.1[[11]]
+# model with constant bmi
+nat.1[[12]]
+# model with linear bmi
+nat.1[[13]]
+# model with spline bmi
+nat.1[[14]]
+
+```
+
+
+## Ovarian
+
+```{r}
+
+# chi-sq tests
+ov.1[[1]]
+
+# AIC
+ov.1[[9]]
+
+# original model with no bmi
+ov.1[[11]]
+# model with constant bmi
+ov.1[[12]]
+# model with linear bmi
+ov.1[[13]]
+# model with spline bmi
+ov.1[[14]]
+
+```
+
+## Hysterectomy without bilateral oophorectomy
+
+```{r}
+
+# chi-sq tests
+surg.1[[1]]
+
+# AIC
+surg.1[[9]]
+
+# original model with no bmi
+surg.1[[11]]
+# model with constant bmi
+surg.1[[12]]
+# model with linear bmi
+surg.1[[13]]
+# model with spline bmi
+surg.1[[14]]
+
+```
+
+
+# Tests for the models with BMI at baseline covariates
+
+```{r}
+
+pre.1[[3]]
+
+nat.1[[3]]
+
+ov.1[[3]]
+
+surg.1[[3]]
+
+
+```

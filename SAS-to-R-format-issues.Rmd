@@ -1,0 +1,109 @@
+---
+title: "Compare different ways to import SAS data set with formats into R"
+output:
+  pdf_document: 
+    number_sections: true
+  html_document: default
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = T, 
+                      eval = T, # change to T if you want to re-run w/ new data
+                      results = 'markup',
+                      warning = F)
+```
+
+```{r}
+require(haven)
+```
+
+
+```{r, echo=FALSE}
+saspath <- 'C:/Program Files/SASHome/SASFoundation/9.4/sas.exe'
+sasopts <- "-nosplash -log 'c:\\temp' -ls 80 -ps 60  -nocenter -nodate -nofmterr" # see http://bit.ly/1QB4ZTb
+```
+
+# Use haven package to read in SAS data set with the corresponding original format catalog.
+
+## Method 1
+
+Use the original SAS format file, sisformats.sas7bcat.
+
+The format catalog is not read with the error, "Error in df_parse_sas_file(spec_data, spec_cat, encoding = encoding, catalog_encoding = catalog_encoding,  : Failed to parse U:/projects/Sister Study/formats/sisformats.sas7bcat: Invalid file, or file has unsupported features."
+
+```{r, eval=F}
+
+df1= read_sas(data_file="../../Sister Study/data/dr00224_00_02/dr00224_00_02.sas7bdat",
+                 catalog_file = "../../Sister Study/formats/sisformats.sas7bcat" )
+
+```
+
+## Method 2
+
+Try using a format file with UTF-8 encoding, sisformats-UTF-8.sas7bcat.
+
+Still get the same error: "Error in df_parse_sas_file(spec_data, spec_cat, encoding = encoding, catalog_encoding = catalog_encoding,: Failed to parse U:/projects/Sister Study/formats/sisformats-UTF-8.sas7bcat: Invalid file, or file has unsupported features."
+
+
+```{r, eval=F}
+
+# read original SAS data into R: only repeat if new data
+
+df1 = read_sas(data_file="../../Sister Study/data/dr00224_00_02/dr00224_00_02.sas7bdat",
+                 catalog_file = "../../Sister Study/formats/sisformats-UTF-8.sas7bcat" )
+
+
+```
+
+If I omit the catalog I can read in the dr00224_00_02.sas7bdat and get the labels but not formats.
+
+
+```{r, eval=T}
+
+df = read_sas(data_file="../../Sister Study/data/dr00224_00_02/dr00224_00_02.sas7bdat")
+
+# example
+attr(df$AL_DrinkCat6, "label")
+
+```
+
+
+## Method 3
+
+After some investigation, try only using the columns in the format file with non-missing values.
+
+### SAS code to alter the format catalog
+
+```{r, engine='sas', engine.path=saspath, engine.opts=sasopts, results='markup', echo=TRUE, message=T, warning=FALSE, eval=T}
+
+libname libf "..\..\Sister Study\formats";
+*proc contents data=libf.sisformats_data order=varnum;
+*run;
+
+data libf.sisformats_datasub; 
+set libf.sisformats_data(keep=fmtname start end label min max default length); 
+where fmtname not in ("BCDXDTSRC","BCSTGSR","BCSTGSRC", "BCTYPESRC", "CHEMODRUG", "LATF",
+"NAANALYSISF", "NADIETRPTF", "NAOUTLBF", "STAGEF", "CENSUSDIVCREATE", "CENSUSREGCREATE");
+run; * These variables have overlapping ranges?;
+
+LIBNAME fcat_out "..\..\Sister Study\formats-subset";
+PROC FORMAT CNTLIN=libf.sisformats_datasub LIBRARY=fcat_out.sisformats; 
+RUN;
+
+```
+
+This format file, .sas7bcat, works. Assuming the haven package has problems reading in columns from a format file with no values in them.
+
+```{r, eval=T}
+
+df1 = read_sas(data_file="../../Sister Study/data/dr00224_00_02/dr00224_00_02.sas7bdat",
+                 catalog_file = "../../Sister Study/formats-subset/sisformats.sas7bcat" )
+
+# check
+attr(df1$AL_DrinkCat6, "labels")
+table(df1$AL_DrinkCat6)
+
+```

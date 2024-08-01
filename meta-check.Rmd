@@ -1,0 +1,710 @@
+---
+title: "Estimate linear change in BMI across cohorts, meta-analyze, and check for heterogeneity."
+editor_options:
+  chunk_output_type: console
+fontsize: 2pt
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+    toc_depth: 3
+  pdf_document:
+    includes:
+      in_header: preamble-latex2.tex
+    latex_engine: pdflatex
+    number_sections: yes
+    toc: yes
+    toc_depth: 3
+linkcolor: magenta
+mainfont: Arial
+geometry: margin=1.5cm
+citecolor: red
+urlcolor: blue
+classoption: 
+  - landscape
+---
+
+<!-- # Code from U:\projects\bmi-menopause\scripts-update\section10-test-meta.Rmd -->
+
+Estimate linear change in BMI using both cox model and pamm, meta-analyze coefficient from cox model, and test for heterogeneity.
+ 
+```{r , include=FALSE}
+knitr::opts_chunk$set(comment=NA, 
+                      prompt=FALSE, 
+                      cache=FALSE, 
+                      echo=F, 
+                      results='hide',
+                      warning=F, 
+                      fig.height=10,
+                      fig.width=7.5)
+```
+
+
+```{r, include=F}      
+# increase memory to run following coxph
+memory.limit(size=13e6)  # size is in megabytes
+```
+
+```{r, include=F, eval=T}
+
+require(knitr)
+
+library(tidyr)
+library(dplyr)
+library(plyr)
+library(ggplot2)
+library(survival)
+library(mgcv)
+library(pammtools)
+library(meta)
+require(data.table)
+
+
+theme_set(theme_bw())
+
+Set1    <- RColorBrewer::brewer.pal(9, "Set1")
+Greens  <- RColorBrewer::brewer.pal(9, "Greens")
+Purples <- RColorBrewer::brewer.pal(9, "Purples")
+
+```
+
+
+```{r, eval=T}
+# R on slurm is saving the environment from previous run. remove all objects from prior runs to clear up memory so I can run this script.
+rm(list=ls()) 
+gc()
+
+```
+
+
+```{r, eval=T}
+
+load(file="bmidat-pamm.RData") # df.ped from sample-bmi-time-dept-datahandling.Rmd
+
+summary(df.ped)
+df.ped$bmi = df.ped$bmi/5
+names(df.ped)
+
+dt.ped = data.table(df.ped)
+
+# events per cohort and menopause status
+
+dt.ped[order(meno.cause.t.f, cohort.f, ped_status), .(number_of_distinct_ids = uniqueN(censor_id)), by=c("meno.cause.t.f", "cohort.f", "ped_status")] # total unique ids
+
+```
+
+
+```{r}
+# format cohorts with their names and not numbers
+
+levels(factor(dt.ped$cohort.f))
+
+df.ped$cohort.f = factor(df.ped$cohort.f, 
+                         levels = c("11", "12", "13", "15", 
+                                    "17", "18", "19", "20",
+                                    "21", "22", "23", "24", 
+                                    "26", "27", "28", "29",
+                                    "30", "31", "32", "34",
+                                    "35", "36"),
+                         labels = c('Breakthrough Generations Study', # 11
+                                    'California Teachers Study', # 12
+                                    'Canadian Study of Diet, Lifestyle and Health', #13
+                                    "Clue II", #15
+                                    
+                                    'E3N', #17	
+                                    'EPIC', #18, European Prospective Investigation into Cancer and Nutrition
+                                    'Melbourne Collaborative Cohort Study', #19
+                                    "Norwegian Breast Cancer Screening Programme", # 20
+                                    
+                                    "NOWAC (Norwegian Women and Cancer Study)", #21
+                                    "Nurses' Health Study I", #22	 
+                                    "Nurses' Health Study II", #23	
+                                    "NYU Women's Health Study", #24	
+                                    
+                                    "Singapore Chinese Health Study", #26
+                                    "Sister Study", #27
+                                    "Southern Community Cohort", #28	
+                                    "Swedish Mammography Cohort", #29
+                                    
+                                    "US Radiologic Technologists Cohort", #30	
+                                    "Women's Lifestyle and Health Study (Sweden)", #31	
+                                    "HUNT", #32
+                                    "Black Women's Health Study", #34
+                                    
+                                    "Mayo Mammography Health Study", #35
+                                    "Shanghai Women's Health Study" #36
+                                    ))
+
+levels(df.ped$cohort.f)
+
+df.ped$cohort.f = factor(df.ped$cohort.f)
+levels(df.ped$cohort.f)
+
+```
+
+
+```{r}
+
+# make function to loop over cohorts and menopause person-time
+
+get.meta.coef = function(ped.df) {
+
+ tryCatch({
+   
+   # ped.df = df.ped %>% filter(cohort.f==27 & meno.cause.t.f == "Medically induced loss of ovarian function") # debug
+   # ped.df = df.ped %>% filter(cohort.f==27 & meno.cause.t.f == "Natural") # debug
+   
+   cohort = as.character(unique(ped.df$cohort.f)); cohort
+   menop = as.character(unique(ped.df$meno.cause.t.f)); menop
+   
+   # class(ped.df)
+   # df = data.frame(ped.df)
+   # class(df)
+   # names(df)
+   # df = df %>% rename(event = ped_status)
+   # head(df)
+   
+   # data transformation
+   ped.df <- ped.df %>%
+     mutate( t = (tstart-41) + (tend - tstart) ) # age range from 40 to 55, 48 median
+   
+   # head(ped.df) %>% select(interval, ped_status, bmi, tstart, tend, t)
+   # class(ped.df)
+   # summary(ped.df$tstart)
+
+   if(length(table(ped.df$ped_status))==2 & table(ped.df$ped_status)[2] > 0) { # do analyses for cohorts with events>=10
+     
+      # assume linear shape of bmi hr over time
+      pam <- bam(ped_status ~ s(tend) + bmi + bmi:t,
+                 data = ped.df, 
+                 offset = offset,
+                 family = poisson(),
+                 method = "fREML", 
+                 discrete = TRUE)
+      
+      s = summary(pam); s
+      
+      # assume constant bmi hr over age-time
+      pam.c <- bam(ped_status ~ s(tend) + bmi ,
+                 data = ped.df, 
+                 offset = offset,
+                 family = poisson(),
+                 method = "fREML", 
+                 discrete = TRUE)
+      
+      s.c = summary(pam.c); s.c
+      s.c$se
+      s.c$p.coeff
+      
+    cph <- coxph(
+      formula = Surv(tstart, tend, ped_status) ~ bmi + tt(bmi) ,
+      data    = data.frame(ped.df),
+      tt      = function(x, t, ...) x * t)
+    
+    cph.summary = summary(cph); cph.summary
+    names(cph.summary)
+    cph.summary$coefficients
+    
+    return(data.frame(cohort = paste(cohort),
+                      menop = paste(menop),
+                      var = c(paste(rownames(cph.summary$coefficients)), "bmi.fixed"),
+                      coef = c(cph.summary$coefficients[,c(1)], s.c$p.coeff["bmi"]),
+                      se = c(cph.summary$coefficients[,c(3)], s.c$se["bmi"])))
+#                        var = paste(rownames(s$p.table)),
+#                        s$p.table[,1:2]))
+   } 
+      }, 
+  error = function(e) {NULL})
+}
+
+```
+
+```{r}
+
+# Run function over combos of cohort and menopause status
+
+list.meta.coefs <- dlply(df.ped, c("cohort.f", "meno.cause.t.f"), get.meta.coef)
+
+```
+
+```{r, fig.width=7, fig.height=8}
+
+#sapply(list.meta.coefs, is.null) # there is at least one combo (11.ov) that does not have any output
+listmc <- list.meta.coefs[!sapply(list.meta.coefs,is.null)]  # if you want to remove missing elements from list
+#sapply(listmc, is.null) # check
+list.meta.coefs
+
+coef.by = ldply(listmc)
+table(coef.by$var)
+head(coef.by[coef.by$cohort==27,])
+tail(coef.by)
+
+# take bmi interaction with age-time and make meta object
+# source: https://bookdown.org/MathiasHarrer/Doing_Meta_Analysis_in_R/pooling-es.html#pre-calculated-es
+
+coefs2 = coef.by[which(coef.by$var == "tt(bmi)"), c('coef', 'se', 'cohort', 'menop')]
+head(coefs2)
+
+names(coefs2) = c("TE", "seTE", "cohort", "menop")
+#coef.by[coef.by$cohort==27,] # check
+
+```
+
+# Meta-analyses
+
+## Meta analyses of slopes
+
+### Plotted together
+
+```{r}
+
+# change name from surgical menopause to uterectomy
+
+coefs2 = within(coefs2, {
+  menop = ifelse(menop=="Surgical menopause", "Uterectomy", menop)
+})
+
+```
+
+
+```{r, fig.height=12, fig.width=6}
+
+m.tot <- metagen(TE,
+             seTE,
+             data=coefs2,
+             studlab=paste(cohort),
+             byvar=menop,
+             comb.random = F,
+             prediction=F,
+             sm="")
+
+forest(m.tot, 
+       common=T,
+       layout = "JAMA", 
+       col.by="black",
+       subgroup = TRUE,
+       col.subgroup = "black",
+       print.subgroup.name=F,
+       test.subgroup=F,
+       overall.hetstat=F,
+       overall=F,
+       prediction.subgroup=F,
+#       subgroup.name = "Menopause status",
+       print.byvar = FALSE, 
+       print.tau2 = FALSE,
+       bysort = FALSE)
+
+
+```
+
+
+
+
+
+
+```{r}
+# source: https://bookdown.org/MathiasHarrer/Doing_Meta_Analysis_in_R/forest.html
+
+png(file = "forestplot-slope.png", 
+    width = 2800, 
+    height = 3800, 
+    res = 300)
+
+forest(m.tot, 
+       common=T,
+       layout = "JAMA", 
+       col.by="black",
+       subgroup = TRUE,
+       col.subgroup = "black",
+       print.subgroup.name=F,
+       test.subgroup=F,
+       overall.hetstat=F,
+       overall=F,
+       prediction.subgroup=F,
+#       subgroup.name = "Menopause status",
+       print.byvar = FALSE, 
+       print.tau2 = FALSE,
+       bysort = FALSE)
+
+
+dev.off()
+
+```
+
+
+### Natural
+    
+```{r}
+
+kable(coefs2[which(coefs2$menop=="Natural"),], booktabs=T)
+
+m.nat <- metagen(TE,
+             seTE,
+             data=coefs2[which(coefs2$menop=="Natural"),],
+             studlab=paste(cohort),
+             comb.random = T,
+             prediction=TRUE,
+             sm="")
+
+m.nat
+
+```
+
+```{r, results='markup', fig.height=8, fig.width=12}
+
+# Source: https://bookdown.org/MathiasHarrer/Doing_Meta_Analysis_in_R/forest.html
+forest(m.nat, 
+       common=T,
+       sortvar=TE,
+       digits=3,
+       leftcols = c("studlab"),
+       leftlabs = c("Cohort"),
+       text.fixed="log(HR), interaction term")
+
+```
+
+### Premenopausal
+
+```{r}
+
+kable(coefs2[which(coefs2$menop=="Premenopausal"),], booktabs=T)
+
+m.pre <- metagen(TE,
+             seTE,
+             data=coefs2[which(coefs2$menop=="Premenopausal"),],
+             studlab=paste(cohort),
+             comb.random = T,
+             prediction=F)
+
+m.pre
+
+```
+
+
+```{r, results='markup', fig.height=8, fig.width=12}
+
+# Source: https://bookdown.org/MathiasHarrer/Doing_Meta_Analysis_in_R/forest.html
+forest(m.pre, 
+       sortvar=TE,
+       digits=3,
+       leftcols = c("studlab"),
+       leftlabs = c("Cohort"),
+       text.fixed="log(HR), interaction term")
+
+```
+
+
+### Ovarian
+
+```{r}
+
+kable(coefs2[which(coefs2$menop=="Medically induced loss of ovarian function"),], booktabs=T)
+
+m.ov =  metagen(TE,
+             seTE,
+             data=coefs2[which(coefs2$menop=="Medically induced loss of ovarian function"),],
+             studlab=paste(cohort),
+             comb.random = T,
+             prediction=TRUE,
+             sm="")
+
+m.ov
+
+# Source: https://bookdown.org/MathiasHarrer/Doing_Meta_Analysis_in_R/metareg.html
+
+# no evidence of heterogenity of bmi change over age-time for the cohorts when evaluated separately for menopause status person-time.
+```
+
+
+```{r, results='markup', fig.height=8, fig.width=12}
+
+# Source: https://bookdown.org/MathiasHarrer/Doing_Meta_Analysis_in_R/forest.html
+forest(m.ov, 
+       sortvar=TE,
+       digits=3,
+       leftcols = c("studlab"),
+       leftlabs = c("Cohort"),
+       text.fixed="log(HR), interaction term")
+
+```
+
+
+### Surgical
+
+```{r}
+
+kable(coefs2[which(coefs2$menop=="Uterectomy"),], booktabs=T)
+
+
+m.surg =  metagen(TE,
+             seTE,
+             data=coefs2[which(coefs2$menop=="Uterectomy"),],
+             studlab=paste(cohort),
+             #comb.fixed = TRUE,
+             comb.random = T,
+             prediction=TRUE,
+             sm="")
+
+m.surg
+
+# Source: https://bookdown.org/MathiasHarrer/Doing_Meta_Analysis_in_R/metareg.html
+
+# no evidence of heterogenity of bmi change over age-time for the cohorts when evaluated separately for menopause status person-time.
+```
+
+
+```{r, results='markup', fig.height=8, fig.width=12}
+
+# Source: https://bookdown.org/MathiasHarrer/Doing_Meta_Analysis_in_R/forest.html
+forest(m.surg, 
+       sortvar=TE,
+       digits=3,
+       leftcols = c("studlab"),
+       leftlabs = c("Cohort"),
+       text.fixed="log(HR), interaction term")
+
+```
+
+
+## Meta analyses of constant BMI
+
+
+```{r}
+
+coefs3 = coef.by[which(coef.by$var == "bmi.fixed"), c('coef', 'se', 'cohort', 'menop')]
+names(coefs3) = c("TE", "seTE", "cohort", "menop")
+#coefs2
+#head(coefs3[coefs3$cohort==27,])
+
+```
+
+
+
+```{r}
+
+# change name from surgical menopause to uterectomy
+
+coefs3 = within(coefs3, {
+  menop = ifelse(menop=="Surgical menopause", "Uterectomy", menop)
+})
+
+```
+
+### Plotted together
+
+
+```{r}
+
+m.tot <- metagen(TE,
+             seTE,
+             data=coefs3,
+             studlab=paste(cohort),
+             byvar=menop,
+             comb.random = F,
+             prediction=F,
+             sm="")
+
+
+forest(m.tot, 
+       layout = "JAMA", 
+       #layout = "RevMan5",
+       subgroup = TRUE,
+       col.by="black",
+       print.subgroup.name=F,
+       prediction.subgroup=F,
+       test.subgroup=F,
+       overall=F,
+       overall.hetstat = F,
+#       subgroup.name = "Menopause status",
+       print.byvar = FALSE, 
+       print.tau2 = FALSE,
+       bysort = FALSE)
+
+
+```
+
+
+```{r}
+# source: https://bookdown.org/MathiasHarrer/Doing_Meta_Analysis_in_R/forest.html
+
+png(file = "forestplot-int.png", 
+    width = 2800, 
+    height = 3800, 
+    res = 300)
+
+
+forest(m.tot, 
+       layout = "JAMA", 
+       #layout = "RevMan5",
+       subgroup = TRUE,
+       col.by="black",
+       print.subgroup.name=F,
+       prediction.subgroup=F,
+       test.subgroup=F,
+       overall=F,
+       overall.hetstat = F,
+#       subgroup.name = "Menopause status",
+       print.byvar = FALSE, 
+       print.tau2 = FALSE,
+       bysort = FALSE)
+
+
+dev.off()
+
+```
+
+
+### Natural
+
+```{r}
+
+
+m.nat <- metagen(TE,
+             seTE,
+             data=coefs3[coefs3$menop=="Natural",],
+             studlab=paste(cohort),
+             comb.fixed = F,
+             comb.random = T,
+             prediction=TRUE,
+             sm="")
+
+m.nat
+```
+
+
+```{r, results='markup', fig.height=8, fig.width=12}
+# Source: https://bookdown.org/MathiasHarrer/Doing_Meta_Analysis_in_R/forest.html
+forest(m.nat, 
+       sortvar=TE,
+       digits=4,
+       leftcols = c("studlab"),
+       leftlabs = c("Cohort"),
+       text.fixed="log(HR), intercept")
+
+```
+
+
+```{r, fig.height=8, fig.width=8}
+# source: https://bookdown.org/MathiasHarrer/Doing_Meta_Analysis_in_R/forest.html
+# print off natural menopause intercept meta-analyses for job talk slides, 2/2023
+png(file = "forestplot-int-nat.png", 
+    width = 2800, 
+    height = 2800, 
+    res = 300)
+
+forest(m.nat, 
+       sortvar=TE,
+       digits=4,
+       leftcols = c("studlab"),
+       leftlabs = c("Cohort"),
+       text.fixed="log(HR), intercept")
+
+
+dev.off()
+
+```
+
+### Premenopausal
+
+```{r}
+
+m.pre <- metagen(TE,
+             seTE,
+             data=coefs3[coefs3$menop=="Premenopausal",],
+             studlab=paste(cohort),
+             comb.fixed = TRUE,
+             comb.random = FALSE,
+             prediction=TRUE,
+             sm="")
+
+m.pre
+```
+
+
+```{r, results='markup', fig.height=8, fig.width=12}
+
+# Source: https://bookdown.org/MathiasHarrer/Doing_Meta_Analysis_in_R/forest.html
+forest(m.pre, 
+       sortvar=TE,
+       digits=4,
+       leftcols = c("studlab"),
+       leftlabs = c("Cohort"),
+       text.fixed="log(HR), intercept")
+
+```
+
+
+
+### Ovarian
+
+```{r}
+
+m.ov =  metagen(TE,
+             seTE,
+             data=coefs3[coefs3$menop=="Medically induced loss of ovarian function",],
+             studlab=paste(cohort),
+             comb.fixed = TRUE,
+             comb.random = FALSE,
+             prediction=TRUE,
+             sm="")
+
+m.ov
+
+# Source: https://bookdown.org/MathiasHarrer/Doing_Meta_Analysis_in_R/metareg.html
+
+# no evidence of heterogenity of bmi change over age-time for the cohorts when evaluated separately for menopause status person-time.
+```
+
+
+
+```{r, results='markup', fig.height=8, fig.width=12}
+
+# Source: https://bookdown.org/MathiasHarrer/Doing_Meta_Analysis_in_R/forest.html
+forest(m.ov, 
+       sortvar=TE,
+       digits=4,
+       leftcols = c("studlab"),
+       leftlabs = c("Cohort"),
+       text.fixed="log(HR), intercept")
+
+```
+
+
+
+
+### Surgical
+
+```{r}
+
+
+kable(coefs3[which(coefs3$menop=="Uterectomy"),], booktabs=T)
+
+m.surg =  metagen(TE,
+             seTE,
+             data=coefs3[which(coefs3$menop=="Uterectomy"),],
+             studlab=paste(cohort),
+             comb.fixed = TRUE,
+             comb.random = FALSE,
+             prediction=TRUE,
+             sm="")
+
+m.surg
+
+# Source: https://bookdown.org/MathiasHarrer/Doing_Meta_Analysis_in_R/metareg.html
+
+# no evidence of heterogenity of bmi change over age-time for the cohorts when evaluated separately for menopause status person-time.
+```
+
+
+```{r, results='markup', fig.height=8, fig.width=12}
+
+# Source: https://bookdown.org/MathiasHarrer/Doing_Meta_Analysis_in_R/forest.html
+forest(m.surg, 
+       sortvar=TE,
+       digits=3,
+       leftcols = c("studlab"),
+       leftlabs = c("Cohort"),
+       text.fixed="log(HR), interaction term")
+
+```
+

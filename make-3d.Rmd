@@ -1,0 +1,314 @@
+---
+title: "Pooled analyses for BMI HR by menopause status. 3d figures"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  html_document:
+    toc: true # table of content true
+    toc_depth: 3  # upto three depths of headings (specified by #, ## and ###)
+    number_sections: true  ## if you want number sections at each table header
+    theme: united  # many options for theme, this one is my favorite.
+    highlight: tango  # specifies the syntax highlighting style
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      eval=T,
+                      fig.keep=F) 
+```
+
+
+```{r, eval=T, include=F}
+
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+theme_set(theme_bw())
+library(survival)
+library(mgcv)
+library(pammtools)
+require(data.table)
+require(cowplot)
+
+```
+
+<!-- NOTE: The function is based on test-3d.Rmd code -->
+
+```{r}
+# R on slurm is saving the environment from previous run. Remove all objects from prior runs to clear up memory so I can run this script.
+rm(list=ls()) 
+gc()
+
+```
+
+```{r, eval=T}
+
+load(file="bmidat-pamm.RData") # df.ped from sample-bmi-time-dept-datahandling.Rmd
+class(df.ped)
+
+table(df.ped$meno.cause.t.f)
+summary(df.ped$tstart)
+# Medically induced loss of ovarian function
+# Natural
+# Premenopausal
+# Surgical menopause
+
+```
+
+
+```{r}
+
+make.fig = function(mtype, xrange1, xrange2){
+  # mtype: menopause type to subset person-time
+  # xrange1: lower age limit
+  # xrange2: upper age limit
+  
+  # mtype="Medically induced loss of ovarian function"; xrange1=50; xrange2=55; # debug
+  
+    menotype = mtype
+
+    mdat = df.ped %>% 
+      select(-id) %>%
+      filter(meno.cause.t.f == menotype) %>%
+      filter(tend>=xrange1) %>%
+      rename(event=ped_status) 
+
+    # Now that I've excluded time ranges, I need to re-do the ped object so it runs properly
+    mdat2 <- as_ped(Surv(tstart, tend, event) ~ bmi + cohort.f + censor_id,
+                    data=data.frame(mdat))
+    
+    mdat2$cohort.f = factor(mdat2$cohort.f)
+        
+        
+    # PAM with different hazards by cohort, stratification by cohort.
+    # ==================================
+    
+    # source: https://stat.ethz.ch/R-manual/R-devel/library/mgcv/html/smooth.terms.html
+    # Source: https://adibender.github.io/pammtools/articles/tveffects.html#pam-with-smooth-smoothly-time-varying-effect-of-the-karnofsky-score
+    
+    pam1 <- bam(ped_status ~ s(tend, k=4) + s(tend, by=bmi, k=4) + cohort.f + s(tend, by=cohort.f, k=4),
+            data = mdat2,
+            offset = offset, 
+            family = poisson, 
+            method = "fREML", 
+            discrete = TRUE)
+    
+    # make data for plotting
+    term.df <- mdat2 %>% 
+      filter(tend>=50) %>%
+      ped_info() %>% 
+      add_term(pam1, term = "bmi") %>%
+        mutate_at(c("fit", "ci_lower", "ci_upper"), funs(. / .data$bmi)) 
+    
+    plot1 <- ggplot(term.df, aes(x = tend, y = exp(fit))) +
+        geom_step() +
+        geom_stepribbon(aes(ymin = exp(ci_lower), 
+                            ymax = exp(ci_upper)), alpha = 0.2) +
+        xlab("t") + ylab("HR") +
+      geom_hline(yintercept=1, lty=2)
+    
+    
+    # Non-linear, non-linearly time-varying effects
+    pam2 <- bam(
+      formula = ped_status ~ s(tend, k=4) + cohort.f + s(tend, by=cohort.f, k=4) + s(bmi, k=4) + ti(tend, bmi),
+      data   = mdat2,
+      family = poisson(),
+      offset = offset)
+    
+    pam2.summary = summary(pam2)
+    
+    # 1) heat map/contour plot
+    # =========================================
+    
+    te_gg <- gg_tensor(pam2) +
+      geom_vline(xintercept = c(xrange1+1, xrange2-1), lty = 3) +
+      geom_hline(yintercept = c(20, 25, 30), lty = 3) +
+      scale_fill_gradient2(
+        name = expression(HR(list(x[plain(bmi)], t))),
+        low  = "steelblue", 
+        high = "firebrick2") +
+      geom_contour(col = "grey30") +
+      xlab("age (years)") +
+      ylab(expression(x[plain(bmi)])) +
+      theme(legend.position  = "bottom") +
+      ylim(20,50) + 
+      xlim(xrange1, xrange2)
+    
+    te_gg
+    
+    
+    # 2) plot f(bmi, age) for specific slices
+    # ===================================
+    
+    Set1    <- RColorBrewer::brewer.pal(9, "Set1")
+    Greens  <- RColorBrewer::brewer.pal(9, "Greens")
+    Purples <- RColorBrewer::brewer.pal(9, "Purples")
+    Purples = c(Purples[c(1, 3, 5, 7, 9)], Set1[c(2, 4, 6, 8)])
+    
+    bmi_df <- mdat2 %>%
+      make_newdata(tend = unique(tend), 
+                   bmi = c(20,25,30)) %>%
+      add_term(pam2, term = "bmi")
+    
+    head(bmi_df)
+    
+    
+    
+    bmi_gg <- ggplot(bmi_df, aes(x = tend, 
+                                 y = exp(fit))) +
+      geom_step(aes(col = factor(bmi)), lwd = 1.1) +
+      geom_stepribbon(aes(ymin = exp(ci_lower), 
+                          ymax = exp(ci_upper), 
+                          fill = factor(bmi)),
+        alpha = .2) +
+      scale_color_manual(
+        name   = expression(x[plain(bmi)]),
+        values = Greens[c(4, 7, 9)]) +
+      scale_fill_manual(
+        name   = expression(x[plain(bmi)]),
+        values = Greens[c(4, 7, 9)]) +
+      ylab(expression(HR(list(x[plain(bmi)], age)))) +
+      xlab("Age(years)") +  
+      coord_cartesian(ylim = c(0.75, 1.4)) +
+      theme(legend.position  = "bottom") +
+      xlim(xrange1, xrange2)
+    
+    bmi_gg
+    
+    
+    # 3) plot f(age, bmi) for specific slices
+    # ======================================
+  
+    time_df <- mdat2 %>%
+      make_newdata(tend = seq(xrange1, xrange2, 2), 
+                   bmi = seq(20, 50, by = 5)) %>%
+      add_term(pam2, term = "bmi")
+    
+    time_gg <- ggplot(time_df, aes(x = bmi)) +
+      geom_line(aes(y = exp(fit), col = factor(tend)), lwd = 1.1) +
+      geom_ribbon(aes(ymin = exp(ci_lower), 
+                      ymax = exp(ci_upper),
+                      fill = factor(tend)),
+        alpha = .2) +
+      scale_color_manual(name = "t", values = Purples) +
+      scale_fill_manual(name = "t", values = Purples) +
+      ylab(expression(HR(list(x[plain(bmi)], age)))) +
+      xlab(expression(x[plain(bmi)])) +
+      coord_cartesian(ylim = c(0,3)) +
+      theme(legend.position  = "bottom")
+    
+    time_gg
+    
+    # combine all three plots together
+    # =====================================
+    
+    combine.plot = plot_grid(te_gg, bmi_gg, time_gg, 
+              nrow=1)
+    
+    list.of.stuff = list(plot1 = plot1, 
+                         te_gg = te_gg, 
+                         bmi_gg = bmi_gg, 
+                         time_gg = time_gg, 
+                         pam2.summary = pam2.summary)
+
+    rm(list = setdiff(ls(), c("list.of.stuff", names(list.of.stuff)))) # take out any objects from the environment outside of my stuff so it's not saved in RData file. If I don't then the RData file is huge because it is saving all the data files as well.
+
+# source: https://community.rstudio.com/t/r-regression-model-size-gets-larger-when-being-saved-within-a-function/87609/4
+    
+    return(list.of.stuff)
+
+}
+
+```
+
+
+```{r}
+
+# Medically induced loss of ovarian function
+# Natural
+# Premenopausal
+# Surgical menopause
+
+ov.plots = make.fig(mtype="Medically induced loss of ovarian function", 50, 55)
+nat.plots = make.fig(mtype="Natural", 50, 55)
+pre.plots = make.fig(mtype="Premenopausal", 40, 50)
+surg.plots = make.fig(mtype="Surgical menopause", 50, 55)
+
+```
+
+```{r}
+
+save(ov.plots,
+     nat.plots,
+     pre.plots,
+     surg.plots,
+     file="3dplots.RData")
+
+```
+
+
+```{r, eval=T}
+
+load("3dplots.RData")
+
+# ovarian
+ov.plot = plot_grid(ov.plots[[2]],
+                    ov.plots[[3]],
+                    ov.plots[[4]],
+              nrow=1)
+ov.plot
+
+ggsave(filename = "ov-3d.png",
+       width = 10,
+       height=4)
+
+# natural
+nat.plot = plot_grid(nat.plots[[2]],
+                    nat.plots[[3]],
+                    nat.plots[[4]],
+              nrow=1)
+nat.plot
+
+ggsave(filename = "nat-3d.png",
+       width = 10,
+       height=4)
+
+# premenopausal
+pre.plot = plot_grid(pre.plots[[2]],
+                    pre.plots[[3]],
+                    pre.plots[[4]],
+              nrow=1)
+pre.plot
+
+ggsave(filename = "pre-3d.png",
+       width = 10,
+       height=4)
+
+# surgical
+surg.plot = plot_grid(surg.plots[[2]],
+                    surg.plots[[3]],
+                    surg.plots[[4]],
+              nrow=1)
+surg.plot
+
+ggsave(filename = "surg-3d.png",
+       width = 10,
+       height=4)
+
+```
+
+Summary of models
+
+```{r, eval=T}
+
+ov.plots[[5]]
+
+nat.plots[[5]]
+
+pre.plots[[5]]
+
+surg.plots[[5]]
+
+```
+

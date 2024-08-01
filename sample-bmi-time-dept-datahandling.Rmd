@@ -1,0 +1,1560 @@
+---
+title: "Pooled analyses for BMI HR by menopause status data handling"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  html_document:
+    toc: true # table of content true
+    toc_depth: 3  # upto three depths of headings (specified by #, ## and ###)
+    number_sections: true  ## if you want number sections at each table header
+    theme: united  # many options for theme, this one is my favorite.
+    highlight: tango  # specifies the syntax highlighting style
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE, 
+                      eval=F) #only set to eval=T for new data,otherwise takes time to run the first half of this script (over 30 mins)
+
+```
+
+
+```{r, eval=T, include=F}
+
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+theme_set(theme_bw())
+library(survival)
+library(mgcv)
+library(pammtools)
+require(data.table)
+
+```
+
+
+```{r, eval=T}
+
+# function to remove objects with largest size before saving coefficients
+
+# source: https://gist.github.com/DexGroves/a3ef6586133c12b876d0c76815813e9f
+# and https://stackoverflow.com/questions/36305062/how-can-i-reduce-the-size-of-a-linear-model-saved-by-a-shiny-app
+
+cleanModel1 = function(cm) {
+  # just in case we forgot to set
+  # y=FALSE and model=FALSE
+  cm$linear.predictors = NULL
+  cm$residuals = NULL
+  cm$y = NULL
+  cm$na.action = NULL
+  
+  attr(cm$terms,".Environment") = c()
+  attr(cm$formula,".Environment") = c()
+  return(cm)
+}
+
+cleanModel2 = function(cm) {
+  # just in case we forgot to set
+  # y=FALSE and model=FALSE
+  cm$linear.predictors = NULL
+  cm$residuals = NULL
+  cm$y = NULL
+  cm$na.action = NULL
+  cm$fitted.values = NULL
+  cm$weights = NULL
+  cm$working.weights = NULL
+  cm$prior.weights = NULL
+  cm$dw.drho = NULL
+  cm$hat = NULL
+  cm$model = NULL
+  cm$offset = NULL
+  
+  attr(cm$terms,".Environment") = c()
+  attr(cm$formula,".Environment") = c()
+  return(cm)
+}
+
+```
+
+
+```{r, eval=F}
+
+# raw data
+# https://socserv.mcmaster.ca/jfox/Books/Companion/scripts/appendix-cox.R
+recidivism <- read.table(
+    file   = "https://math.unm.edu/~james/Rossi.txt",
+    header = TRUE) %>%
+  mutate(subject=row_number())
+
+head(recidivism)
+dim(recidivism)
+names(recidivism)
+
+```
+
+```{r, eval=F}
+
+# transform into long format
+recidivism_long <- recidivism %>%
+  gather(calendar.week, employed, emp1:emp52) %>%
+  filter(!is.na(employed)) %>% # employed unequal to NA only for intervals under risk
+  group_by(subject) %>%
+  mutate(
+    start  = row_number()-1,
+    stop   = row_number(),
+    arrest = ifelse(stop == last(stop) & arrest == 1, 1, 0),
+    offset = log(stop - start)) %>%
+  select(subject, start, stop, offset, arrest, employed, fin:educ) %>%
+  arrange(subject, stop)
+
+recidivism_long <- recidivism_long %>%
+  mutate(employed.lag1 = lag(employed, default=0)) %>%
+  slice(-1) %>% # exclusion of first week, as lagged information is missing
+  ungroup()
+
+head(recidivism_long)
+
+recidivism_long %>%
+  filter(subject==1)
+
+```
+
+
+```{r, eval=T}
+
+# for some reason, R on slurm is saving the environment from previous run. Need to remove all objects from prior runs to clear up memory so I can run this script.
+rm(list=ls()) 
+gc()
+
+```
+
+```{r}
+
+# do similar data handling with bmi and pmbccg data
+
+# make person-time data for each type of menopause group
+# load cohort data from section10-test-comparison.Rmd with cohorts having enough cases
+# setwd("W:\\projects\\bmi-menopause\\consortium-analysis\\consortium-analysis-2021-update") # for debugging only
+load("../data/pmbcc.RData") # has df1 from data-describe.Rmd
+dim(df1) # 1062883 by 539
+
+# Determine amount of memory object is using
+# source: https://stackoverflow.com/questions/1395270/determining-memory-usage-of-objects
+sort( sapply(ls(),function(x){object.size(get(x))})) 
+# 4653473256 bytes ~ 4gb
+# 12 Gb per CPU on highmem partition)
+# source: https://osc.niehs.nih.gov/hpcdocs/
+
+
+```
+
+
+```{r}
+
+# get subset of variables to include
+
+menop.vars.t = dput( paste0('MENO_AGE_t', 1:13)) # make a vector of time-related menopause variables: Age at menopause, if post menopausal
+menop.status.t = dput(paste0("MENO_STATUS_t", 1:8)); menop.status.t
+
+menop.cause.t = dput( paste0('MENO_CAUSE_t', 1:8)) # Why do we only have cause of menopause until t8? Only NHS has time up to time 13.
+
+menop.time.vars = dput( paste0('MENO_QAGE_t', 1:13)) # Age at which information on current menopausal status was collected
+
+hrt.status.vars = dput( paste0('HRT_STATUS_t', 1:13)) 
+hrt.ever.vars = dput( paste0('HRT_EVER_t', 1:13)) 
+hrt.time.vars = dput( paste0('HRT_QAGE_t', 1:13)) 
+
+bmi.time.vars = dput(names(df1)[grep("WEIGHT_QAGE", names(df1))]) # Ages at which current adult weight was assessed
+bmi.vars = dput(names(df1)[grep("BMI_t", names(df1))]) # Ages at which current adult weight was assessed
+
+# added following an internal review of analyses in January 2023 requesting adjustment for potential confounders
+# DOB_YR: year of birth
+# MENA_AGE:	Age at menarche
+# AGE_FB:	Age at first birth
+# Time since last birth: (BASE_AGE:	Age of baseline questionnaire) - (AGE_LB:	Age at last birth)
+# Parity: BIRTH_NO =	Number of births (not sure if this is really parity but assuming number of live births)
+# FAM_BC:	1st degree family history of breast cancer
+
+extra.vars = c('DOB_YR',
+#               'MENA_AGE',
+#               'AGE_FB',
+#               'BASE_AGE',
+               'AGE_LB',
+               'BIRTH_NO',
+               'FAM_BC')
+
+vars.include = c("CENSOR_ID", "BASE_AGE", "CENSOR_END_AGE",
+                "CENSOR_BCA_AGE", "CENSOR_CASE", 
+                "CENSOR_FUPTIME", "COHORT", "NUMCOUNTRY_S18", "COHORT",
+                "BMI",  "BCA_YR", "BCA_AGE", "BCA_EXTENT", "MAMMO",
+                "ETHNIC", "MENA_AGE", "MENO_STATUS", "MENO_AGE", 
+                "AGE_FB", 'WEIGHT_SOURCE',
+                'HRT_STATUS', 'HRT_EVER', 'HRT_QYR',  'MENO_CAUSE', 
+                'WEIGHT_YA',
+                'WEIGHT_YA_1824',
+                'WEIGHT_YA_2534',
+                'WEIGHT_YA_3544',
+                'WEIGHT_YA_4554',
+                'WEIGHT_YA_AGE',
+                'WEIGHT_YA_AGE_1824',
+                'WEIGHT_YA_AGE_2534',
+                'WEIGHT_YA_AGE_3544',
+                'WEIGHT_YA_AGE_4554',
+                'WEIGHT_YA_SOURCE',
+                'ADJCENTERB_S18',
+                'HEIGHT',
+                menop.vars.t, menop.status.t, menop.time.vars,
+                menop.cause.t,
+                bmi.vars,
+                bmi.time.vars,
+                extra.vars)
+
+
+```
+
+
+
+```{r}
+
+# select out subset of variables to make smaller data set
+df1.sub. <- df1 %>% select(unlist(lapply(vars.include, noquote)))
+dim(df1.sub.)
+
+# convert some values to missing
+# source: https://stackoverflow.com/questions/7235657/fastest-way-to-replace-nas-in-a-large-data-table
+df1.sub = setDT(df1.sub.)[, names(df1.sub.) := lapply(.SD, function(x) {x[x %in% c(99, 999, 888, 8888, 9999)] <- NA ; x})]
+df1.sub = data.frame(df1.sub)
+
+# make new variable: Time since last birth: (BASE_AGE:	Age of baseline questionnaire) - (AGE_LB:	Age at last birth)
+
+df1.sub = within(df1.sub, {
+  TIME_SINCE_LB = BASE_AGE - AGE_LB
+})
+
+rm(df1.sub.) # free up space
+```
+
+```{r}
+
+# need to remove df1 to free up memory
+rm(df1)
+
+```
+
+
+```{r}
+
+# updated menopause variables
+# original ones have mistakes, don't use
+# see U:\projects\bmi-menopause\consortium-analysis\data questions\`meno_age_s table.pdf` for additional info on variables
+
+load(file="../data/meno_age_extra.RData") # meno.age.extra from 'data set contents.Rmd'
+dim(meno.age.extra)
+names(meno.age.extra)
+
+#1=natural; 2=bilateral oophorectomy; 3=hysterectomy only;  4=other surgery; 5=chemotherapy; 6=other treatment; 7=other; 111=premenopausal; 999=n/k
+table(meno.age.extra$meno_cause_s, useNA = "always")
+table(round(meno.age.extra$meno_Age_s,0))
+
+```
+
+```{r}
+
+# Merge original and updated together
+
+# who has menopause age after base age new data?
+df2.sub = merge(meno.age.extra[,#meno.age.extra$meno_rule_s %in% c(1),
+                             c("censor_id", "meno_Age_s", "meno_rule_s", "meno_cause_s")], 
+              df1.sub,
+              by.x="censor_id", by.y="CENSOR_ID",
+              all.x=T)
+
+dim(df2.sub)
+table(df2.sub$meno_rule_s)
+# meno_rule_s 
+# 1=reported age at meno
+# 2=last known pre (>reported age)
+# 3=last known pre (>50)
+# 4=first known postmenop (<50y)
+# 5=Age 50 (No info, latest Qage>50y)
+# 6=Age 50 (Latest Qage<50y)
+
+#df2.sub = test1 #[which(test1$meno_rule_s %in% c(1,3)),] # subset to women who report an age at menopause or are premenopausal at administrative censoring (age = 50)
+
+dim(meno.age.extra)
+dim(df1.sub)
+dim(df2.sub)
+# 547293 by 108
+
+```
+
+
+```{r}
+# replace all 999's in bmi vars with missing values
+df2.sub <- df2.sub %>% mutate(across(all_of(c("BMI", "ETHNIC" ,
+                                              bmi.vars,
+                                              bmi.time.vars,
+                                              menop.vars.t, 
+                                              menop.status.t, 
+                                              menop.time.vars,
+                                              menop.cause.t)), ~replace(., . ==999, NA)))
+
+
+```
+
+```{r}
+
+summary(df2.sub[c("BMI", "BASE_AGE", "WEIGHT_QAGE", "BMI_t1", "WEIGHT_QAGE_t1")]) # check
+
+with(df2.sub, table(COHORT, MENO_CAUSE ))
+with(df2.sub, table(COHORT, meno_cause_s))
+with(df2.sub[df2.sub$COHORT==12,], table(CENSOR_CASE, meno_cause_s))
+
+head(df2.sub[df2.sub$censor_id %in% c('11_K312D325', 
+                                      "11_K312D749"), 
+             c('censor_id', "BMI", "BASE_AGE", "CENSOR_END_AGE",
+               bmi.vars, bmi.time.vars)]) # first person reports first bmi value at age after 55. not in the join2 sample but in the ped data frame from prior analyses. second person only has bmi at base_age.
+
+gc()
+
+df2.sub[df2.sub$censor_id %in% c("12_102453"),]
+
+```
+
+```{r}
+
+# remove these objects to free up space
+
+rm(df1.sub)
+gc()
+
+```
+
+```{r, eval=F, include=F}
+
+# for debugging purposes only
+# make smaller, more manageable data frame
+
+df2.sub = df2.sub[df2.sub$COHORT %in% c(11,12, 18, 27, 35),]  %>% 
+  group_by(COHORT, MENO_CAUSE, ETHNIC, CENSOR_CASE) %>% 
+  sample_n(size = 100, replace=T) # # start with a small number and do entire sample on server after debugging.
+
+# pick 2 cohorts that cover all meno_cause_s for debugging
+table(df2.sub$COHORT)
+with(df2.sub, table(COHORT, CENSOR_CASE))
+
+with(df2.sub, table(COHORT, ETHNIC))
+with(df2.sub, table(COHORT, MENO_CAUSE))
+
+# TO MAKE as_ped function work below, I need to select out unique ids
+
+df2.sub = unique(df2.sub)
+
+```
+
+```{r, eval=T}
+
+# rename bmi time vars so they sort properly below
+names.bmi.time.vars.double = c("WEIGHT_QAGE_t00",
+                                  "WEIGHT_QAGE_t01",
+                                  "WEIGHT_QAGE_t10",
+                                  "WEIGHT_QAGE_t11",
+                                  "WEIGHT_QAGE_t12",
+                                  "WEIGHT_QAGE_t13",
+                                  "WEIGHT_QAGE_t02",
+                                  "WEIGHT_QAGE_t03",
+                                  "WEIGHT_QAGE_t04",
+                                  "WEIGHT_QAGE_t05",
+                                  "WEIGHT_QAGE_t06",
+                                  "WEIGHT_QAGE_t07",
+                                  "WEIGHT_QAGE_t08",
+                                  "WEIGHT_QAGE_t09")
+```
+
+
+```{r}
+# data handling for BMI variables
+
+# table(test.dat$COHORT)
+# names(test.dat)
+# summary(test.dat$censor_id)
+
+bmi.time.vars.2 = c("WEIGHT_QAGE_t0", bmi.time.vars[-1]); bmi.time.vars.2
+
+
+names(df2.sub[bmi.time.vars])
+names(df2.sub)[names(df2.sub) %in% bmi.time.vars] = names.bmi.time.vars.double
+head(df2.sub[names.bmi.time.vars.double])
+
+# this person has two duplicate questionnaire ages
+
+df2.sub %>% 
+  select(names.bmi.time.vars.double, censor_id) %>% 
+  filter(censor_id == "17_259997")
+
+# this cohort has people with bmi with survey ages recorded to one decimal place, unlike many other cohorts. Will take floor of age to make similar to other cohorts age precision.
+df2.sub %>% 
+  select(names.bmi.time.vars.double, censor_id) %>% 
+  filter(censor_id == "22_X110086109")
+```
+
+
+```{r, eval=T}
+
+# rename bmi vars so they sort properly below
+names.bmi.vars.double = c("BMI_t00",
+                                  "BMI_t01",
+                                  "BMI_t10",
+                                  "BMI_t11",
+                                  "BMI_t12",
+                                  "BMI_t13",
+                                  "BMI_t02",
+                                  "BMI_t03",
+                                  "BMI_t04",
+                                  "BMI_t05",
+                                  "BMI_t06",
+                                  "BMI_t07",
+                                  "BMI_t08",
+                                  "BMI_t09")
+```
+
+```{r}
+
+names(df2.sub[c("BMI", bmi.vars)])
+names(df2.sub)[names(df2.sub) %in% c("BMI", bmi.vars)] = names.bmi.vars.double
+head(df2.sub[names.bmi.vars.double])
+
+```
+
+
+```{r}
+# Create time to event data
+
+table(df2.sub$MENO_CAUSE)
+table(df2.sub$COHORT)
+
+# prep data
+
+table(df2.sub$MENO_CAUSE)
+
+  df2.sub = within(df2.sub, {
+    floor.entry = floor(BASE_AGE)
+    ceiling.censor = ceiling(CENSOR_END_AGE)
+    event = ifelse(CENSOR_CASE==1,1,
+                   ifelse(CENSOR_CASE==0, 0, NA)) # people with age at dx after age=55 are not cases -- all people administratively censored at age 55?
+# leave out people with censor_case==2, see 3/30/2021 email from Melissa House    
+    baseline.menop.status = ifelse(is.na(MENO_AGE), 0, 
+                                       ifelse( (MENO_AGE < BASE_AGE | MENO_STATUS==3), 1, # coding at DataRequestTemplateVersion6_PremenopausalBreastcancerGroup_Jan11_2017.xlsx
+                                               ifelse(MENO_STATUS>=777, NA, 0))) # from documentation: 777=unknown due to hormonal contraception or treatment or hysterectomy without bilateral oophorectomy; 888=never menses; 999=n/k
+        # note: this variable doesn't work for cohorts that ahve missing age at baseline (and postmenopausal)
+    
+        AGE_FB2 =  ifelse(is.na(AGE_FB), 0, AGE_FB) # If missing then assume nulliparous. 
+        age.fb.cat = cut(AGE_FB2, c(-Inf, 0, 20, 24, 29, 55), include.lowest = T)
+        age.fb.cat =  relevel(age.fb.cat, ref="(20,24]") # make 20-24 the referent group
+        ethnic.f = factor(ETHNIC,
+                          labels=c("African ancestry or black",
+                                   "Asian",
+                                   "European ancestry or white",
+                                   "more than 1 reported",
+                                   "other"))
+        menop.age.baseline =  ifelse(meno_Age_s < BASE_AGE, meno_Age_s, NA) 
+
+        meno.cause.f = ifelse(MENO_CAUSE<111, MENO_CAUSE, NA)
+        meno.cause.f = factor(meno.cause.f, labels=c("Natural",
+                                                 "Bilateral oophorectomy",
+                                                 "Hysterectomy only",
+                                                 "Other surgery",
+                                                 "Chemotherapy",
+                                                 "Other treatment",
+                                                 "Other"))
+        cohort.f = factor(COHORT)
+        bmi.center = as.numeric(scale(BMI_t00, scale=F))
+
+  })
+
+dim(df2.sub)
+summary(df2.sub$BMI_t00)
+
+# df2.sub.df = data.frame(df2.sub[!(is.na(df2.sub$meno_cause_s)) & !(is.na(df2.sub$meno_Age_s)),])
+
+dim(df2.sub)
+df2.sub = df2.sub[which(df2.sub$event %in% c(0,1)),] # exclude people without event status 
+dim(df2.sub)
+
+save(df2.sub, file="subset.RData") # save data with all participants and subset of variables.
+
+```
+
+```{r}
+load(file="subset.RData")
+# Select out the ids that have people with no BMI measured after 40 and people with no information I can use to determine age at (and cause of) menopause or last time premenop for those who do not report menopause.
+
+# from sample-size-info.Rmd (no longer using)
+#load(file = "ids-from-flow.RData") # ids.all.bmi and ids.restrict.bmi
+
+```
+
+
+```{r}
+
+# transform bmi time vars into long format
+# source: https://afit-r.github.io/tidyr
+df.long.time <- df2.sub %>% #test.dat %>%
+  select(censor_id, names.bmi.time.vars.double) %>%
+#  rename(WEIGHT_QAGE_t0 = WEIGHT_QAGE) %>%
+  gather(bmi.time.var, bmi.age, names.bmi.time.vars.double) %>%
+  group_by(censor_id) %>%
+  arrange(censor_id, bmi.time.var) %>%
+  extract(bmi.time.var, c("var", "time"), "(.*)_(.*)") 
+# source: https://stackoverflow.com/questions/49900323/separate-string-after-last-underscore
+
+df.long.time %>% filter(censor_id == '11_K312A208')
+df.long.time %>% filter(censor_id ==  "11_K312D749")
+df.long.time %>% filter(censor_id == "17_259997")
+
+df.long.time = df.long.time %>%
+  mutate(bmi.age = floor(bmi.age))
+
+df.long.time %>%
+  filter(censor_id == "22_X110086109") # check
+
+# transform bmi vars into long format
+# ======================================
+
+df.long.bmi <- df2.sub %>% #test.dat %>%
+  select(censor_id, names.bmi.vars.double) %>%
+#  rename(BMI_t0=BMI) %>%
+  gather(bmi.var, bmi, all_of(names.bmi.vars.double)) %>%
+  group_by(censor_id) %>%
+  arrange(censor_id, bmi.var) %>%
+  extract(bmi.var, c("var", "time"), "(.*)_(.*)") 
+
+#df.long.bmi %>% filter(censor_id == '11_K312A208')
+df.long.bmi %>% filter(censor_id == "11_K312D749")
+df.long.bmi %>% filter(censor_id == "17_259997")
+#tail(df.long.bmi)
+
+# merge BMI and time of weight q together
+# ================================================
+# source: https://dplyr.tidyverse.org/reference/mutate-joins.html
+dt.long.time = data.table(df.long.time[,c('censor_id', 'time', 'bmi.age')])
+setkey(dt.long.time, censor_id, time)
+
+dt.long.bmi = data.table(df.long.bmi[, c('censor_id', 'time' ,'bmi')])
+setkey(dt.long.bmi, censor_id, time)
+
+# source: https://stackoverflow.com/questions/34598139/left-join-using-data-table
+df.long = dt.long.time[dt.long.bmi] # use data.table for faster merge
+
+# df.long = df.long.time %>% select(censor_id, time, bmi.age) %>%
+#   left_join(df.long.bmi %>% select(censor_id, time, bmi),
+#             by=c("censor_id", "time"))
+
+head(df.long)
+
+df.long %>% filter(censor_id == "11_K312D749")
+df.long %>% filter(censor_id == "12_102453")
+
+# PROBLEM with duplicate ages for some people. This is a problem for the merge below.
+# Take average of bmi for duplicated age rows of data if there are multiple rows with same age, sorted by time of survey 
+# if two of the same ages, take average bmi across the two ages
+# source: https://stackoverflow.com/questions/13279582/select-the-first-row-by-group
+
+# NOTE: this is a large data set so need to use data table. dplyr takes too long
+keys = c('censor_id', 'time', 'bmi.age')
+dt.bmi <- data.table(df.long, key=keys)
+dt.bmi %>% filter(censor_id == "17_259997")
+
+# get first row of data by id and age, sorted by time of survey
+dt.bmi.1 = dt.bmi[, head(.SD, 1), by=c('censor_id', 'bmi.age')]
+dt.bmi.1  %>% filter(censor_id == "17_259997")
+
+# get average bmi across 2 duplicate ages
+dt.bmi.avg = dt.bmi[,list(avg.bmi= mean(bmi)), c('censor_id', 'bmi.age')]
+dt.bmi.avg %>% filter(censor_id == "17_259997")
+
+# merge the survey time info with average bmi across the duplicate ages.
+# ===============================================================
+dt.bmi.2 = dt.bmi.1 %>% select(censor_id, time, bmi.age) %>%
+  left_join(dt.bmi.avg %>% select(censor_id, bmi.age, avg.bmi),
+            by=c("censor_id", "bmi.age"))
+
+dt.bmi.2 %>% filter(censor_id == "17_259997")
+dt.bmi.2 %>% filter(censor_id == "22_X110086109") # check
+df.long  %>% filter(censor_id == "22_X110086109") # check
+
+dt.bmi.2[, .(number_of_distinct_ids = uniqueN(censor_id))]
+
+# remove any missing bmi or bmi time values, need both together
+nomiss = dt.bmi.2[which(!( is.na(dt.bmi.2$bmi.age) | is.na(dt.bmi.2$avg.bmi) )),]
+
+# then count how many unique ids are left in sample
+nomiss[, .(number_of_distinct_ids = uniqueN(censor_id))]
+dim(nomiss) 
+
+# convert back to data frame
+df.long.rev = data.frame(nomiss)
+dim(df.long.rev)
+
+# free up memory
+rm(dt.bmi.2)
+rm(nomiss)
+#tail(df.long)
+
+
+
+```
+
+```{r}
+
+# Make time to event data
+
+# take out people missing BMI/age at BMI
+nomiss.id = unique(df.long.rev$censor_id)
+
+# create long form of data with 1-year time intervals for time-dept analyses below.
+dat_ped <- as_ped(Surv(floor.entry, ceiling.censor, event) ~ meno_Age_s + meno_cause_s + cohort.f + 
+                    MENO_CAUSE +
+                    meno.cause.f +
+                    meno_rule_s +
+                    ethnic.f + 
+                    DOB_YR + 
+                    MENA_AGE + 
+                    AGE_FB + 
+                    BIRTH_NO + 
+                    FAM_BC + 
+                    TIME_SINCE_LB +
+                    menop.age.baseline + 
+                    BMI_t00 + 
+                    WEIGHT_YA_1824 +
+                    HEIGHT +
+                    HRT_EVER +
+                    age.fb.cat +
+                    BASE_AGE +
+                    censor_id,
+                  data = df2.sub[which(df2.sub$censor_id %in% nomiss.id),])#,
+                  #id='censor_id') # note: you can't have an id unless it's for a flat file
+
+names(dat_ped)
+
+#dat_ped = dat_ped %>% 
+#  rename(id = censor_id)
+
+class(dat_ped)
+dim(dat_ped)
+length(unique(dat_ped$censor_id))
+
+gc()
+#dat_ped %>% filter(id==1)
+
+```
+
+```{r}
+
+dat_ped = within(dat_ped, {
+  menop.group.t. =  ifelse(meno_Age_s < tstart, meno_cause_s, NA)
+
+  menop.4group.t = ifelse(meno_Age_s>tstart, "Premenopausal",
+                          ifelse(meno_cause_s %in% c(1), "Natural",
+                                 ifelse(meno_cause_s %in% c(3), "Surgical menopause",
+                                        ifelse(meno_cause_s %in% c(2,5), "Medically induced loss of ovarian function", NA))))
+
+   })
+
+# for people with surgical menopause, they are not labeled as menopausal until the administrative censoring time of 55 years (for the Sister Study, not all studies.)
+
+dim(dat_ped)
+
+# check that the people who have meno_rule_s %in% c(2,3,6) only have their premenop person time listed
+
+# for now, exclude any person-time for meno_rule_s = 2,3,6 that is listed as postmenop (meno_Age_s < tstart)
+
+head(data.frame(dat_ped[which(dat_ped$meno_rule_s==2 & dat_ped$menop.4group.t=="Natural"),]))
+
+dim(dat_ped)
+
+# only use postmeno time for those people who reported a meno time and all premeno time for all meno_rule_s groups.
+# in the age at menopause set by the 'meno_age_s table.pdf' document.
+
+#dat_ped = dat_ped[which(!(dat_ped$meno_rule_s %in% c(2,3,4,5,6) & !(dat_ped$menop.4group.t=="Premenopausal"))),]
+
+dim(dat_ped)
+
+# people who have meno_rule_s = 4 
+
+head(data.frame(dat_ped[which(dat_ped$meno_rule_s==4),]),30)
+
+with(dat_ped, table(meno_rule_s, menop.4group.t))
+
+```
+
+
+```{r}
+
+rm(df2.sub) # remove data frame to free up memory to run
+gc()
+
+```
+
+
+```{r}
+
+# Create age-time dependent menopause status variable
+
+dat_ped = dat_ped %>% 
+    mutate( meno.t = ifelse(meno_Age_s<tend-1, 1, 0)) %>% # make a time dept menopause variable with one year lag
+    mutate ( meno.cause.t = ifelse(meno_Age_s<tend-1, menop.4group.t, "Premenopausal")) %>%
+    mutate ( meno.cause.t.f = factor(meno.cause.t)) # need to do this for pam model to run below if you use strata
+#    mutate(logt = log(tstart + (tend - tstart) / 2 ),
+#           t = ((tstart + (tend - tstart) / 2 )-41)) # age range from 40 to 55, 48 median
+# age range does not begin at 40 any more because of my merge issues below. so leave out the logt and t values for now. can add to join2 below
+  
+#dat_ped[dat_ped$censor_id %in% c("11_K356F971"),]
+
+dim(dat_ped)
+```
+
+
+```{r}
+
+# join the bmi data to the survival data
+
+# merge BMI and time together
+# source: https://dplyr.tidyverse.org/reference/mutate-joins.html
+gc()
+
+df.long.rev$bmi.age = floor(df.long.rev$bmi.age) # there are some people with bmi age to one decimal point. Take floor of that value to get that one year age. For example, age at 47.1 will now be 47.
+# if you don't
+df.long.rev$bmi.age.orig = df.long.rev$bmi.age
+
+head(df.long.rev)
+# take only values with non-missing bmi values
+df.long.rev = df.long.rev[complete.cases(df.long.rev$avg.bmi),]
+head(df.long.rev)
+
+df.long.rev %>% filter(censor_id == '11_K313A176')
+
+df.long.rev %>% filter(censor_id == "11_K312D749")
+dat_ped %>% filter(censor_id == "11_K312D749")
+
+dat_ped %>% filter(censor_id == "12_102453")
+df.long.rev %>% filter(censor_id == "12_102453")
+
+dat_ped %>% filter(censor_id == "22_X110086109")
+df.long.rev %>% filter(censor_id == "22_X110086109")
+
+
+df.long.rev = df.long.rev %>% 
+  rename(bmi = avg.bmi)
+
+dim(df.long.rev) #check
+dim(dat_ped) # check
+
+join1 = dat_ped %>% 
+  left_join(df.long.rev %>% select(censor_id, bmi.age, bmi.age.orig, bmi),
+            by = c("censor_id"="censor_id", "tstart" = "bmi.age"))
+
+dim(join1) # check 
+
+dim(join1[which(complete.cases(join1$bmi.age) & complete.cases(join1$bmi)),]) # count person-time with non-missing bmi and time of bmi
+length(unique(join1$censor_id))
+
+```
+
+```{r}
+
+# what is count person-time by menopausal groups?
+table(join1$meno.cause.t.f)
+
+```
+
+
+```{r, eval=F, include=F}
+
+# get ids of people who have BMI reported after age 40, the lower age threshold
+# ==============================================================================
+bmi.after40. = dat_ped %>% 
+  filter(tstart>40) 
+dim(bmi.after40.)
+
+bmi.after40 = bmi.after40. %>%
+  left_join(df.long.rev %>% select(censor_id, bmi.age, bmi.age.orig, bmi),
+            by = c("censor_id"="censor_id", "tstart" = "bmi.age")) 
+dim(bmi.after40) # there must be more than one bmi.age censor_id combo after rounding.
+head(bmi.after40)
+names(bmi.after40)
+summary(bmi.after40)
+
+# no duplicates for age by id
+dup.check = data.frame(with(bmi.after40, table(censor_id, bmi.age.orig)))
+head(dup.check[dup.check$Freq==2,])
+
+# person with duplicates (before fixes above) after taking floor of age bmi value
+bmi.after40 %>% filter(censor_id == "17_259997")
+data.frame(meno.age.extra) %>% filter(censor_id == "17_259997")
+data.frame(df.long.rev) %>% filter(censor_id == "17_259997")
+table(df.long.rev$time)
+
+# df2.sub  %>% 
+#   filter(censor_id == "17_259997") %>% 
+#   select(c("BMI_t00", "BASE_AGE", names.bmi.vars.double, names.bmi.time.vars.double)) # check
+
+ids.bmi.after40 = bmi.after40 %>%
+  filter(!is.na(bmi)) %>%
+  select("censor_id")
+
+ids.bmi.after40 = data.frame(ids.bmi.after40)
+head(ids.bmi.after40)
+
+ids.bmi.after40 = unique(ids.bmi.after40$censor_id)
+head(ids.bmi.after40)
+dim(ids.bmi.after40)
+
+all.ids = unique(join1$censor_id)
+length(all.ids)
+gc()
+
+# people who do not have a bmi recorded after 40
+not.in.after.40 = all.ids[which(!(all.ids %in% ids.bmi.after40))]
+
+#class(all.ids); #class(ids.bmi.after40)
+#table(all.ids %in% ids.bmi.after40)
+
+#length(not.in)
+#length(all.ids)
+sample.not.in = head(not.in.after.40)
+
+data.frame(df.long)  %>% filter(censor_id %in% sample.not.in) # check
+
+# person who only had bmi at baseline before age 40.
+join1 %>% filter(censor_id == "11_K312D749")
+join1 %>% filter(censor_id == "12_102453")
+
+tail(join1)
+head(join1)
+
+#join1 %>% filter(censor_id == '11_K312B223')
+#join1 %>% filter(censor_id == '11_K313A176')
+#join1 = join1 %>% filter(cohort.f %in% c("11", "27")) # for debugging only
+dim(join1)
+
+```
+
+
+```{r}
+
+# now fill bmi up to next, non-missing, point.
+# also put the age at which the first measure was done then fill up to next reported bmi
+
+join2 = join1 %>%
+  group_by(censor_id) %>%
+  fill(bmi) %>%
+  fill(bmi.age.orig)
+
+dim(join2)
+length(unique(join2$censor_id))
+
+# person who only had bmi at baseline before age 40.
+data.frame(join1) %>% filter(censor_id == "11_K312D749")
+data.frame(join2) %>% filter(censor_id == "11_K312D749")
+
+data.frame(join1) %>% filter(censor_id == "12_102453")
+data.frame(join2) %>% filter(censor_id == "12_102453")
+
+save(join2, nomiss.id,
+     file="bmidat.RData") # join2 has BMI carried forward for all ages.
+
+```
+
+<!-- The next set of sections will start subsetting the data according to menopause status criteria -->
+
+```{r, eval=T}
+
+load(file="bmidat.RData") # objects: join2, nomiss.id
+
+summary(join2$bmi)
+
+names(join2)
+```
+
+
+```{r, eval=F, include=F}
+# List of cohorts with no events for postmenopausal person-time
+
+# number of events by menopause person-time status and cohort for all people
+events.1 = setDT(join2 %>% filter(ped_status==1))[order(menop.4group.t), .(number_of_distinct_ids = uniqueN(censor_id)), by=c('menop.4group.t', 'cohort.f')]
+events.1
+
+keep.cohorts = unique(events.1[events.1$menop.4group.t %in% c("Natural", "Surgical menopause", "Medically induced loss of ovarian function") & events.1$number_of_distinct_ids>=10,]$cohort.f)
+
+all.cohorts = unique(join2$cohort.f); all.cohorts
+keep.cohorts
+
+drop.cohorts = all.cohorts[!(all.cohorts %in% keep.cohorts)]; drop.cohorts
+# studies dropped: NOWAC (Norwegian Women and Cancer Study), Swedish Mammography Cohort, HUNT 2 , Shanghai Women's Health Study
+
+#join2.v1 = join2 %>% filter(cohort.f %in% keep.cohorts)
+
+```
+
+
+
+```{r, eval=T}
+
+# Keep person-time for people with premenopausal person-time and/or postmeno person-time with a reported age at meno & reported cause at meno other than 'other'
+
+length(unique(join2$censor_id))
+
+# ids of people with postmenopausal person-time with reported age at menopause and a reported cause
+ids.cause.age = unique(join2[which( ( !(is.na(join2$menop.4group.t)) & join2$meno_rule_s==1)) ,]$censor_id)
+length(ids.cause.age)
+
+# This part of the code only includes people who have a cause of menopause and post-menopausal person-time.
+# join2.v2 = join2[which( (join2$censor_id %in% ids.cause.age) & ((join2$menop.4group.t=="Premenopausal") | ( !(is.na(join2$menop.4group.t)) & join2$meno_rule_s==1))) ,]
+
+join2.v2 = join2[which( ((join2$menop.4group.t=="Premenopausal") | ( !(is.na(join2$menop.4group.t)) & join2$meno_rule_s==1))) ,]
+
+join2.v2[join2.v2$censor_id %in% c('11_K312A872'),]
+
+with(join2.v2, table(meno_cause_s, menop.4group.t))
+
+dim(join2.v2) # check
+length(unique(join2.v2$censor_id))
+
+with(join2.v2, table(menop.4group.t, useNA="always")) # check distribution of menopause status by person time
+with(join2.v2, table(menop.4group.t=="Premenopausal"))
+
+unique.id.menop = unique(join2.v2[c("censor_id", "menop.4group.t")])
+table(unique.id.menop$menop.4group.t, useNA="always") # check distribution of menopause status by person
+head(unique.id.menop[which(is.na(unique.id.menop$menop.4group.t)),])
+# who are the people with missing menop.4group.t
+
+head(join2.v2[which(is.na(join2.v2$menop.4group.t)),]) # they have meno_cause_s=7 (other)
+table(join2.v2[which(is.na(join2.v2$menop.4group.t)),]$meno_cause_s)
+  
+join2.v2$postmeno = ifelse(join2.v2$menop.4group.t=="Premenopausal", 0, 1)
+
+# check number of unique people in each sample by menopause status
+setDT(join2.v2)[, .(number_of_distinct_ids = uniqueN(censor_id)), by=menop.4group.t]
+setDT(join2.v2)[, .(number_of_distinct_ids = uniqueN(censor_id)), by=postmeno]
+table(join2.v2$postmeno)
+
+
+# What is overlap between pre- and postmenopausal groups?
+post = unique(join2.v2[join2.v2$postmeno==1,]$censor_id)
+pre = unique(join2.v2[join2.v2$postmeno==0,]$censor_id)
+length(post); length(pre)
+
+ids.in.both = pre[pre %in% post]
+length(ids.in.both)
+
+ids.in.both2 = post[post %in% pre]
+length(ids.in.both2)
+
+# output ids for this data frame
+ids.v1 = unique(join2.v2$censor_id)
+
+# check number of unique people in each sample by menopause status
+setDT(join2.v2)[, .(number_of_distinct_ids = uniqueN(censor_id))]
+
+```
+
+
+```{r, eval=T}
+
+# Get subset of people who have BMI measure after age at menopause for postmenopausal time
+
+head(join2.v2, 12)
+
+join2.v3.post = join2.v2 %>%
+  filter(postmeno==1) %>%
+  filter(bmi.age.orig>=meno_Age_s-3) # use BMI reported within at most 3 years prior to age at menopause (and carried forward)
+
+join2.v3.pre =  join2.v2 %>%
+  filter(postmeno==0) 
+
+# unique ids
+# ===========================
+# postmenopausal group
+v3.post.ct = setDT(join2.v3.post)[, .(number_of_distinct_ids = uniqueN(censor_id)), by=menop.4group.t]; v3.post.ct
+v3.post.ct2 = setDT(join2.v3.post)[, .(number_of_distinct_ids = uniqueN(censor_id))]; v3.post.ct2
+
+# original data
+length(post)
+# difference
+length(post) - v3.post.ct2$number_of_distinct_ids
+
+# premenopausal
+v3.pre.ct = setDT(join2.v3.pre)[, .(number_of_distinct_ids = uniqueN(censor_id)), by=menop.4group.t]; v3.pre.ct
+
+sum(v3.post.ct$number_of_distinct_ids, v3.pre.ct$number_of_distinct_ids)
+
+# combine the pre and post meno data frames
+join2.v3 = rbindlist(list(join2.v3.post, join2.v3.pre))
+dim(join2.v3) # check
+
+# check number of unique people in each sample by menopause status
+setDT(join2.v3)[, .(number_of_distinct_ids = uniqueN(censor_id)), by=menop.4group.t]
+setDT(join2.v3)[, .(number_of_distinct_ids = uniqueN(censor_id)), by=postmeno]
+setDT(join2.v3)[, .(number_of_distinct_ids = uniqueN(censor_id))]
+
+pre.id = unique(join2.v3.pre$censor_id)
+post.id = unique(join2.v3.post$censor_id)
+  
+length(pre.id[pre.id %in% post.id])
+length(post.id[post.id %in% pre.id])
+
+setDT(join2.v3)[, .N, by=postmeno] # person-time counts
+
+# ids from join2.v3
+v3.ids = unique(join2.v3$censor_id)
+length(v3.ids)
+
+setDT(join2.v3)[, .(number_of_distinct_ids = uniqueN(censor_id))]
+```
+
+```{r, eval=T}
+
+# remove people with no bmi observed during 40-55 interval.
+join2.v4 = join2.v3[bmi.age.orig>=40 & bmi.age.orig<55,]
+
+# check number of unique people in each sample by menopause status
+setDT(join2.v4)[, .(number_of_distinct_ids = uniqueN(censor_id)), by=menop.4group.t]
+
+setDT(join2.v4)[, .(number_of_distinct_ids = uniqueN(censor_id)), by=postmeno]
+setDT(join2.v4)[, .N, by=postmeno] # person-time count
+
+setDT(join2.v4)[, .(number_of_distinct_ids = uniqueN(censor_id))] # total unique ids
+
+summary(join2.v4$tstart) # check 
+summary(join2.v4$tend)
+
+# what is overlap between pre and post groups?
+post.id.v4 = unique(join2.v4[join2.v4$postmeno==1,]$censor_id)
+pre.id.v4 = unique(join2.v4[join2.v4$postmeno==0,]$censor_id)
+
+length(post.id.v4[post.id.v4 %in% pre.id.v4]) # 184,688
+
+setDT(join2.v4)[, .(number_of_distinct_ids = uniqueN(censor_id))]
+```
+
+
+
+```{r, eval=F, include=F}
+
+# who are the people in join2.v3 but not in join2.v4
+v3.ids = unique(join2.v3$censor_id)
+v4.ids = unique(join2.v4$censor_id)
+
+just.v3.ids = v3.ids[!(v3.ids %in% v4.ids)]
+length(just.v3.ids)
+
+v3.and.v4.ids = v3.ids[(v3.ids %in% v4.ids)]
+length(v3.and.v4.ids)
+
+
+just.v3.dat = join2.v3[join2.v3$censor_id %in% just.v3.ids,]
+head(just.v3.dat, 20)
+summary(just.v3.dat$bmi.age.orig) # check
+summary(join2.v4$bmi.age.orig)
+
+# more checks
+v3.and.v4.dat = join2.v3[join2.v3$censor_id %in% v3.and.v4.ids,]
+head(v3.and.v4.dat, 20)
+head(v3.and.v4.dat[v3.and.v4.dat$bmi.age.orig<40,], 20)
+summary(v3.and.v4.dat$bmi.age.orig) # check
+
+v3.and.v4.dat[v3.and.v4.dat$censor_id %in% c('11_K318D549'),] # looks ok. this person is included and had time before 40 and time after 40 with a bmi measured at 40
+
+```
+
+
+```{r, eval=T}
+
+# what are the counts by meno status and cohort?
+
+# for people with an event
+event.ct = setDT(join2.v4[ped_status==1,])[order(menop.4group.t), .(number_of_distinct_ids = uniqueN(censor_id)), by=c('menop.4group.t', 'cohort.f')]
+event.ct
+
+# for all people
+setDT(join2.v4)[order(menop.4group.t), .(number_of_distinct_ids = uniqueN(censor_id)), by=c('menop.4group.t', 'cohort.f')]
+
+# list of cohorts with at least 10 events post-meno person-time
+event.ct.gt20 = event.ct[event.ct$number_of_distinct_ids>=10 & !(event.ct$menop.4group.t=="Premenopausal"),]
+event.ct.gt20
+event.ct.gt20$cohort.f = factor(event.ct.gt20$cohort.f)
+gt20.list = unique(event.ct.gt20$cohort.f)[order(unique(event.ct.gt20$cohort.f))]; gt20.list
+
+# select only these cohorts from premenopausal group
+event.ct.gt20.v2 = event.ct[(event.ct$cohort.f %in% gt20.list) & menop.4group.t == "Premenopausal" & number_of_distinct_ids>=10,]
+event.ct.gt20.v2
+
+# add premenop groups to selection of postmenop groups
+event.ct.gt20.v3 = rbind.data.frame(event.ct.gt20,
+                                    event.ct.gt20.v2)
+event.ct.gt20.v3
+```
+
+
+```{r, eval=T}
+
+# Left join groups of menop status and cohorts with >=10 events
+
+# Source: https://stackoverflow.com/questions/34598139/left-join-using-data-table
+join2.v5 = join2.v4[event.ct.gt20.v3, on=c('menop.4group.t', 'cohort.f'),]
+join2.v5$cohort.f = factor(join2.v5$cohort.f)
+levels(join2.v5$cohort.f)
+table(join2.v5$cohort.f)
+
+dim(join2.v4)
+dim(join2.v5)
+
+# check number of unique people in each sample by menopause status
+setDT(join2.v5)[, .(number_of_distinct_ids = uniqueN(censor_id)), by=menop.4group.t]
+
+setDT(join2.v5)[, .(number_of_distinct_ids = uniqueN(censor_id)), by=postmeno]
+setDT(join2.v5)[, .N, by=postmeno] # person-time count
+
+
+dim(join2.v5)
+
+# check
+setDT(join2.v5[ped_status==1,])[order(menop.4group.t), .(number_of_distinct_ids = uniqueN(censor_id)), by=c('menop.4group.t', 'cohort.f')]
+
+# what is overlap between pre and post groups?
+#post.id.v5 = unique(join2.v5[join2.v5$postmeno==1,]$censor_id)
+#pre.id.v5 = unique(join2.v5[join2.v5$postmeno==0,]$censor_id)
+#length(post.id.v5[post.id.v5 %in% pre.id.v5]) # 184,688
+
+head(join2.v5[join2.v5$censor_id %in% c('12_123675'),])
+
+setDT(join2.v5)[, .(number_of_distinct_ids = uniqueN(censor_id))] # total unique ids
+
+
+```
+
+
+```{r, eval=T}
+
+# remove people with no person-time recorded between 45-55
+# =========================================================
+
+id.pt.lt45 = join2.v5 %>%
+  filter(tstart<45) %>%
+  select(censor_id) %>%
+  distinct() %>%
+  data.frame()
+
+#join2.v4[join2.v4$censor_id=='11_K312C198',] # example of person in both groups
+
+id.pt.ge45 = join2.v5 %>%
+  filter(tstart>=45) %>%
+  select(censor_id) %>%
+  distinct() %>%
+  data.frame()
+
+id.pt.ge45[id.pt.ge45$censor_id %in% c('12_123675'),]
+head(join2.v5[join2.v5$censor_id %in% c('12_123675'),])
+
+id.just.lt45 = id.pt.lt45[!(id.pt.lt45$censor_id %in% id.pt.ge45$censor_id),]
+head(id.just.lt45)
+length(id.just.lt45)
+
+join2.v5.v2 = join2.v5[which(!(join2.v5$censor_id %in% id.just.lt45)),]
+
+setDT(join2.v5.v2)[, .(number_of_distinct_ids = uniqueN(censor_id))] # total unique ids
+
+```
+
+
+```{r, eval=T}
+# take out BMI > 300
+summary(join2.v5.v2$bmi)
+
+join2.v5.2 = data.frame(join2.v5.v2) %>%
+  filter(bmi<300) 
+summary(join2.v5.2$bmi)
+
+table(join2.v5$cohort.f,  useNA="always")
+
+
+dim(join2.v5.2) # person time
+
+# NOTE: join2.v5.2 is the data frame of individuals that is the primary analytic sample
+
+# check number of unique people in each sample by menopause status
+setDT(join2.v5.2)[, .(number_of_distinct_ids = uniqueN(censor_id)), by=c('menop.4group.t', 'cohort.f')]
+
+setDT(join2.v5.2)[, .(number_of_distinct_ids = uniqueN(censor_id))] # total unique ids
+
+
+```
+
+
+```{r, eval=T}
+
+# how many people are premenopausal at baseline, but have postmenopausal person-time in sample?
+
+names(join2.v5.2)
+
+head(data.frame(join2.v5.2)[c("censor_id", "id", "tstart", "tend", "meno.cause.t.f")])
+
+# unique ids with premenopausal person time
+premenop.p = unique(join2.v5.2[which(join2.v5.2$menop.4group.t=="Premenopausal"),]$id)
+
+
+# subset data to only those women
+sub.pre.only = join2.v5.2[which(join2.v5.2$id %in% premenop.p & !(join2.v5.2$meno.cause.t.f=="Premenopausal")),
+                          c("id", "tstart", "meno.cause.t.f")]
+
+
+
+# check
+head(join2.v5.2[which(join2.v5.2$id %in% unique(sub.pre.only$id)),])
+join2.v5.2[join2.v5.2$id==189,]
+
+length(premenop.p)
+length(unique(sub.pre.only$id)) # of the 499,220 with premenopausal person-time in this interval, 183,744 have postmenop person-time
+
+```
+
+
+```{r, eval=T}
+# for sensitivity analyses, repeat the analyses for
+# 1) BMI breast cancer HR adjusted for BMI at age 18-24 years
+
+# sample with info on BMI at 18-24 years
+# original script for this at U:\projects\bmi-menopause\scripts-update\section10-test-strata-adj1.Rmd
+
+#  bmi.1824 = WEIGHT_YA_1824/((HEIGHT/100)^2)
+#  bmi.1824.scale = as.numeric(scale(bmi.1824, scale=F))
+
+load(file="subset.RData") # df2.sub (from above)
+
+summary(df2.sub$WEIGHT_YA_1824)
+summary(df2.sub$HEIGHT)
+head(df2.sub$censor_id)
+
+# merge the bmi info onto the join2.v5 data
+v5 = data.frame(join2.v5) %>%
+  filter(bmi<300) 
+  
+# inner join the data with non-missing weight at 18-24  rows
+early.wt.info = c("censor_id", "WEIGHT_YA_1824", "HEIGHT")
+early.wt = df2.sub[complete.cases(df2.sub[early.wt.info]), early.wt.info]
+summary(early.wt)
+
+dim(df2.sub)
+dim(early.wt)
+head(early.wt)
+head(v5)
+
+# inner join with v5 onto early.wt (keep all early.wt vals and merge with v5 info)
+# leave out any early wt that is not in v5
+v6 = setDT(v5)[setDT(early.wt), on = 'censor_id', nomatch=0]
+dim(v6) #pt
+names(v6)
+v6[, .N, by=postmeno] # total PT
+
+v6[, .(number_of_distinct_ids = uniqueN(censor_id)), by=postmeno] # total unique ids
+v6[, .(number_of_distinct_ids = uniqueN(censor_id))] # total unique ids
+setDT(early.wt)[, .(number_of_distinct_ids = uniqueN(censor_id))] # total unique ids
+
+v6$cohort.f = factor(v6$cohort.f)
+setDT(v6)[, .(number_of_distinct_ids = uniqueN(censor_id)), by=cohort.f] # total unique ids by cohort
+
+# cohorts not in this analysis but in original
+unique(v5$cohort.f[!(v5$cohort.f %in% v6$cohort.f)])
+
+names(v6)
+
+v6 = within(v6, {
+  bmi.1824 = WEIGHT_YA_1824/((HEIGHT/100)^2)
+  bmi.1824.scale = as.numeric(scale(bmi.1824, scale=F))
+  
+  # overweight status
+  bmi.1824.overweight = ifelse(bmi.1824>=25, 1, 0)
+})
+
+summary(v6$bmi.1824)
+summary(v6$bmi.1824.scale)
+
+```
+
+```{r, eval=T}
+
+# omit cohorts with events less than 20 for data subsetted to cohorts with bmi 18-24
+
+# for people with an event
+event.ct.v6 = setDT(v6[ped_status==1,])[order(menop.4group.t), .(number_of_distinct_ids = uniqueN(censor_id)), by=c('menop.4group.t', 'cohort.f')]
+event.ct.v6
+
+# for all people
+setDT(v6)[order(menop.4group.t), .(number_of_distinct_ids = uniqueN(censor_id)), by=c('menop.4group.t', 'cohort.f')]
+
+
+# ==================
+# list of cohorts with at least 10 events post-meno person-time
+event.ct.gt20.v6 = event.ct.v6[event.ct.v6$number_of_distinct_ids>=10 & !(event.ct.v6$menop.4group.t=="Premenopausal"),]
+
+event.ct.gt20.v6
+event.ct.gt20.v6$cohort.f = factor(event.ct.gt20.v6$cohort.f)
+gt20.list = unique(event.ct.gt20.v6$cohort.f)[order(unique(event.ct.gt20.v6$cohort.f))]; gt20.list
+
+# select only these cohorts from premenopausal group
+event.ct.gt20.v6.v2 = event.ct.v6[(event.ct.v6$cohort.f %in% gt20.list) & event.ct.v6$menop.4group.t == "Premenopausal" & event.ct.v6$number_of_distinct_ids>=10,]
+event.ct.gt20.v6.v2
+
+# add premenop groups to selection of postmenop groups
+event.ct.gt20.v6.v3 = rbind.data.frame(event.ct.gt20.v6,
+                                       event.ct.gt20.v6.v2)
+event.ct.gt20.v6.v3
+
+# ==================
+
+# Left join groups of menop status and cohorts with >=10 events
+
+# Source:  https://stackoverflow.com/questions/34598139/left-join-using-data-table
+v6.gt20 = v6[event.ct.gt20.v6.v3, on=c('menop.4group.t', 'cohort.f'),]
+
+dim(v6)
+dim(v6.gt20)
+
+v6[, .(number_of_distinct_ids = uniqueN(censor_id)),] # total unique ids
+
+v6.gt20[, .(number_of_distinct_ids = uniqueN(censor_id)), by=postmeno] # total unique ids
+v6.gt20[, .N, by=postmeno] # total PT by meno status
+
+v6.gt20[, .(number_of_distinct_ids = uniqueN(censor_id)),] # total unique ids
+v6[, .(number_of_distinct_ids = uniqueN(censor_id)),] # total unique ids
+
+```
+
+
+```{r, eval=T}
+
+# for sensitivity analyses, repeat the analyses for
+# 2) group of women who have never taken HRT
+
+# sample with information on HRT
+# original script for this at U:\projects\bmi-menopause\scripts-update\section10-test-strata-adj2.Rmd
+
+summary(df2.sub$HRT_EVER)
+
+# merge the bmi info onto the join2.v5 data
+v5 = data.frame(join2.v5) %>%
+  filter(bmi<300) 
+  
+  
+# inner join the data with non-missing weight at 18-24  rows
+hrt.info = c("censor_id", "HRT_EVER")
+hrt = df2.sub[complete.cases(df2.sub[hrt.info]), hrt.info]
+hrt = hrt[hrt$HRT_EVER==2,] # assuming 1=yes, 2=no according to Copy of DataRequestTemplateVersion7_PremenopausalBreastcancerGroup_March_2018.xlsx
+summary(hrt)
+
+dim(df2.sub)
+dim(hrt)
+head(hrt)
+
+# inner join with v5 onto hrt (keep all hrt vals and merge with v5 info)
+# leave out any hrt that is not in v5
+v7 = setDT(v5)[setDT(hrt), on = 'censor_id', nomatch=0]
+dim(v7) #pt
+names(v7)
+v7[, .N, by=postmeno] # total PT by meno status
+
+v7[, .(number_of_distinct_ids = uniqueN(censor_id)), by=postmeno] # total unique ids
+setDT(hrt)[, .(number_of_distinct_ids = uniqueN(censor_id))] # total unique ids
+
+v7$cohort.f = factor(v7$cohort.f)
+setDT(v7)[, .(number_of_distinct_ids = uniqueN(censor_id)), by=cohort.f] # total unique ids by cohort
+
+# cohorts not in this analysis but in original
+unique(v7$cohort.f[!(v5$cohort.f %in% v7$cohort.f)])
+
+v7[, .(number_of_distinct_ids = uniqueN(censor_id))] # total unique ids
+
+```
+
+
+```{r, eval=T}
+
+# omit cohorts with events less than 20 for group of women who have never taken HRT
+
+# for people with an event
+event.ct.v7 = setDT(v7[ped_status==1,])[order(menop.4group.t), .(number_of_distinct_ids = uniqueN(censor_id)), by=c('menop.4group.t', 'cohort.f')]
+event.ct.v7
+
+# for all people
+setDT(v7)[order(menop.4group.t), .(number_of_distinct_ids = uniqueN(censor_id)), by=c('menop.4group.t', 'cohort.f')]
+
+
+# ==================
+# list of cohorts with at least 10 events post-meno person-time
+event.ct.gt20.v7 = event.ct.v7[event.ct.v7$number_of_distinct_ids>=10 & !(event.ct.v7$menop.4group.t=="Premenopausal"),]
+
+event.ct.gt20.v7
+event.ct.gt20.v7$cohort.f = factor(event.ct.gt20.v7$cohort.f)
+gt20.list = unique(event.ct.gt20.v7$cohort.f)[order(unique(event.ct.gt20.v7$cohort.f))]; gt20.list
+
+# select only these cohorts from premenopausal group
+event.ct.gt20.v7.v2 = event.ct.v7[(event.ct.v7$cohort.f %in% gt20.list) & event.ct.v7$menop.4group.t == "Premenopausal" & event.ct.v7$number_of_distinct_ids>=10,]
+event.ct.gt20.v7.v2
+
+# add premenop groups to selection of postmenop groups
+event.ct.gt20.v7.v3 = rbind.data.frame(event.ct.gt20.v7,
+                                       event.ct.gt20.v7.v2)
+event.ct.gt20.v7.v3
+
+# ==================
+# Left join groups of menop status and cohorts with >=10 events
+
+# Source:  https://stackoverflow.com/questions/34598139/left-join-using-data-table
+v7.gt20 = v7[event.ct.gt20.v7.v3, on=c('menop.4group.t', 'cohort.f'),]
+
+dim(v7)
+dim(v7.gt20)
+
+v7.gt20[, .(number_of_distinct_ids = uniqueN(censor_id)), by=postmeno] # total unique ids
+v7.gt20[, .N, by=postmeno] # total PT by meno status
+
+v7.gt20[, .(number_of_distinct_ids = uniqueN(censor_id))] # total unique ids
+```
+
+```{r, eval=T}
+
+# convert back to piece-wise exp data object
+summary(join2.v5.2$bmi)
+
+# confirm that same number of unique people remains in sample when excluding person-time <45
+# test = join2.v5.2 %>% 
+#   filter(tstart>=45 & tstart<55)
+# test[,.(number_of_distinct_ids = uniqueN(censor_id))]
+# join2.v5.2[,.(number_of_distinct_ids = uniqueN(censor_id))]
+
+
+df = data.frame(join2.v5.2) %>%
+  filter(tstart>44) %>%
+  mutate( t = (tstart-46) + (tend - tstart) ) %>% # age range from 45 to 55
+  rename(event=ped_status) %>%
+  select(-id)
+head(df[df$t==0,]) # check
+
+join2.v5.2[, .(number_of_distinct_ids = uniqueN(censor_id))] # total unique ids
+
+summary(df$tstart)
+summary(df$tend)
+
+head(df)
+names(df)
+
+# create long form of data with 1-year time intervals for time-dept analyses below.
+df.ped <- as_ped(Surv(tstart, tend, event) ~ meno_Age_s + meno_cause_s + cohort.f + meno.cause.t.f + ethnic.f + menop.age.baseline + DOB_YR + MENA_AGE + AGE_FB + TIME_SINCE_LB + BIRTH_NO + FAM_BC + BMI_t00 + WEIGHT_YA_1824 +  HRT_EVER + HEIGHT + MENO_CAUSE + BASE_AGE + bmi + bmi.age.orig + age.fb.cat + t + censor_id, 
+                      data = df)#,
+                 #id = 'censor_id')
+
+class(df.ped)
+summary(df.ped$tstart)
+#df.ped$id = df.ped$censor_id
+
+save(df.ped,
+     file="bmidat-pamm.RData") # 
+
+save(df, file="dat-fortable1.RData")
+
+```
+
+
+```{r, eval=T}
+# get median number of bmi measures per person in analytic sample
+
+load("bmidat-pamm.RData") # df.ped
+
+names(df.ped)
+
+# how many unique combos of  bmi (time dependent bmi) in sample?
+uniq.1 = unique(df.ped[,#df.ped$tstart>=45 & df.ped$tstart<=55, 
+                       c("censor_id", "bmi")])
+dim(uniq.1)
+
+# count the number of ids in the sample
+setDT(uniq.1)[, .(number_of_distinct_ids = uniqueN(censor_id)),] # total unique ids
+
+# median of number of bmi measures per id in the sample
+summary(setDT(uniq.1)[, .(number_of_bmi = .N), by=censor_id]) # total unique ids
+
+# check
+df.ped[df.ped$censor_id == '34_74553',]
+
+```
+
+
+```{r, eval=T}
+
+# save v6 -- sensitivity analyses for early bmi
+
+# convert back to piece-wise exp data object
+
+# note: there are 138 observations with bmi>3000. remove.
+# Also, now that we have finished the time-dept bmi changes that may start <40 years,
+# we can now remove person-time <40
+
+df = data.frame(v6.gt20) %>%
+  filter(bmi<300) %>%
+  filter(tstart>44) %>%
+  mutate( t = (tstart-46) + (tend - tstart) ) %>% # age range from 45 to 55
+  rename(event=ped_status) %>%
+  select(-id)
+head(df)
+
+
+# create long form of data with 1-year time intervals for time-dept analyses below.
+df.ped <- as_ped(Surv(tstart, tend, event) ~ meno_Age_s + meno_cause_s + cohort.f + meno.cause.t.f + ethnic.f + menop.age.baseline + BMI_t00 +  WEIGHT_YA_1824  + MENO_CAUSE + HEIGHT + bmi + t + censor_id + bmi.1824.scale + bmi.1824.overweight + age.fb.cat  + BASE_AGE, 
+                      data = df)
+
+class(df.ped)
+
+save(df.ped,
+     file="bmidat-pamm-v6.RData") # 
+
+```
+
+```{r, eval=T}
+# save v7 -- sensitivity analyses for never HRT
+
+# convert back to piece-wise exp data object
+
+# note: there are 138 observations with bmi>3000. remove.
+# Also, now that we have finished the time-dept bmi changes that may start <40 years,
+# we can now remove person-time <40
+
+df = data.frame(v7.gt20) %>%
+  filter(bmi<300) %>%
+  filter(tstart>44) %>%
+  mutate( t = (tstart-46) + (tend - tstart) ) %>% # age range from 45 to 55
+  rename(event=ped_status) %>%
+  select(-id)
+head(df)
+
+# create long form of data with 1-year time intervals for time-dept analyses below.
+df.ped <- as_ped(Surv(tstart, tend, event) ~ meno_Age_s + meno_cause_s + cohort.f + meno.cause.t.f + ethnic.f + menop.age.baseline + BMI_t00 +  WEIGHT_YA_1824  + MENO_CAUSE + HEIGHT + bmi + t + censor_id + HRT_EVER + age.fb.cat + BASE_AGE, 
+                      data = df)
+
+class(df.ped)
+
+save(df.ped,
+     file="bmidat-pamm-v7.RData") # 
+
+```
+
+
+```{r, eval=T}
+
+rm(join1) # remove data object to free up memory
+rm(dat_ped) # remove object to free up memory
+gc()
+
+```
+

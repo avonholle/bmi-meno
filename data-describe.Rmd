@@ -1,0 +1,77 @@
+---
+title: "Describe data set contents"
+output:
+  html_document:
+    theme: united
+    toc: yes
+editor_options:
+  chunk_output_type: console
+urlcolor: blue
+linkcolor: magenta
+citecolor: red
+geometry: margin=1cm
+mainfont: Arial
+fontsize: 2pt
+---
+
+# Describe data set contents
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(comment=NA, prompt=FALSE, cache=FALSE, echo=F, results='asis',
+                      warning=F)
+```
+
+
+```{r, include=F}
+require(Hmisc)
+require(haven)
+#require(summarytools)
+require(knitr)
+require(kableExtra)
+require(data.table)
+```
+
+```{r, echo=FALSE, eval=F, include=F}
+st_css()
+st_options(plain.ascii = FALSE)
+```
+
+
+```{r, eval=T}
+
+# Remove all objects from prior runs to clear up memory 
+rm(list=ls()) 
+gc()
+
+```
+
+
+```{r, eval=T}
+
+# read original SAS data into R
+# NOTE: only re-run if data changes. takes time.
+
+df1 =  read_sas("../data/dr00228_02_01.sas7bdat", 
+                 catalog_file = "../data/sisformats.sas7bcat" ) # see SAS-to-R-format-issues.Rmd (in U:\projects\Iron-status\sections) for more details
+# source of data is U:\projects\Sister Study\data\dr00228_02_01
+# source of formats is U:\projects\Sister Study\formats-subset
+
+names.case = grep("CASE", names(df1))
+names(df1)[names.case]
+with(df1, table(BCA_CASE, CENSOR_CASE)) 
+
+
+names(df1)[grepl("MENO_CAUSE", names(df1))]
+
+dim(df1) # 1,062,883 by 541
+save(df1, file="../data/pmbcc.RData")
+
+names(df1)[grep("YA", names(df1))] # has new variables
+names(df1)
+table(df1$ADJCENTERB_S18)
+
+```
+
+
+
+

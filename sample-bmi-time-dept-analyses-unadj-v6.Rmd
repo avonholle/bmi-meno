@@ -1,0 +1,486 @@
+---
+title: "Pooled analyses for BMI HR by menopause status. run unadjusted for cohorts in v6 file"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  html_document:
+    toc: true # table of content true
+    toc_depth: 3  # upto three depths of headings (specified by #, ## and ###)
+    number_sections: true  ## if you want number sections at each table header
+    theme: united  # many options for theme, this one is my favorite.
+    highlight: tango  # specifies the syntax highlighting style
+editor_options: 
+  chunk_output_type: console
+---
+
+<!-- NOTE: take cohorts from sample-bmi-time-dept-analyses2-v6.Rmd file in sample-bmi-time-dept-analyses2-v6.Rmd and run unadjusted analyses for these cohorts only. -->
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      eval=T) #only set to eval=T for new data,otherwise takes time to run
+```
+
+
+```{r, eval=T, include=F}
+
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+theme_set(theme_bw())
+library(survival)
+library(mgcv)
+library(pammtools)
+require(data.table)
+
+```
+
+
+
+```{r, eval=T}
+
+# function to remove objects with largest size before saving coefficients
+
+# source: https://gist.github.com/DexGroves/a3ef6586133c12b876d0c76815813e9f
+# and https://stackoverflow.com/questions/36305062/how-can-i-reduce-the-size-of-a-linear-model-saved-by-a-shiny-app
+
+cleanModel1 = function(cm) {
+  # just in case we forgot to set
+  # y=FALSE and model=FALSE
+  cm$linear.predictors = NULL
+  cm$residuals = NULL
+  cm$y = NULL
+  cm$na.action = NULL
+  
+  attr(cm$terms,".Environment") = c()
+  attr(cm$formula,".Environment") = c()
+  return(cm)
+}
+
+cleanModel2 = function(cm) {
+  # just in case we forgot to set
+  # y=FALSE and model=FALSE
+  cm$linear.predictors = NULL
+  cm$residuals = NULL
+  cm$y = NULL
+  cm$na.action = NULL
+  cm$fitted.values = NULL
+  cm$weights = NULL
+  cm$working.weights = NULL
+  cm$prior.weights = NULL
+  cm$dw.drho = NULL
+  cm$hat = NULL
+  cm$model = NULL
+  cm$offset = NULL
+  
+  cm$wt = NULL
+
+  attr(cm$terms,".Environment") = c()
+  attr(cm$formula,".Environment") = c()
+  return(cm)
+}
+
+```
+
+
+
+```{r}
+
+# R on slurm is saving the environment from previous run. Remove all objects from prior runs to clear up memory so I can run this script.
+rm(list=ls()) 
+gc()
+
+```
+
+
+```{r}
+
+# cohorts from sample-bmi-time-dept-analyses2-v6.Rmd
+load(file="v6-cohorts.RData") # cohorts.in.v6 object
+
+```
+
+```{r, eval=T}
+
+load(file="bmidat-pamm.RData") # df.ped from sample-bmi-time-dept-datahandling.Rmd
+
+# change BMI to a 5-unit increase in BMI
+df.ped$bmi = df.ped$bmi/5
+
+df.ped = df.ped[which(df.ped$cohort.f %in% cohorts.in.v6),]
+df.ped$cohort.f = factor(df.ped$cohort.f)
+table(df.ped$cohort.f) # check
+```
+
+
+```{r, eval=F, include=F}
+# for debugging
+
+menotype="Natural"
+menotype="Medically induced loss of ovarian function"
+menotype="Premenopausal"
+menotype="Surgical menopause"
+
+mdat = df.ped %>% 
+  select(-censor_id) %>%
+  filter(meno.cause.t.f == menotype)  %>%
+    rename(strata=cohort.f) 
+table(mdat$strata)
+
+```
+
+```{r}
+
+df.ped %>%
+  filter(censor_id=='11_K312A208')
+
+```
+
+
+
+```{r, eval=T}
+# Set1 <- RColorBrewer::brewer.pal(9, "Set1")
+
+# https://stackoverflow.com/questions/57153428/r-plot-color-combinations-that-are-colorblind-accessible
+colorBlindBlack8  <- c("#000000", "#E69F00", "#56B4E9", "#009E73", 
+                       "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+Set1 = colorBlindBlack8
+
+```
+
+
+# Function to produce pamm regression models and plots
+
+```{r, eval=T}
+# Function to subset by menopause status and run models
+
+get.mods = function(menotype, Model.fun) {
+
+  # bring in model cleaning function to remove the predicted values, etc... that take up too much space.
+  mf = Model.fun #   mf = cleanModel2 # debug
+  # menotype = "Premenopausal" # menotype = "Surgical menopause" #"Medically induced loss of ovarian function" # for debugging
+
+# 1. create data  
+# ==================================
+
+# get cases and person-time
+mdat2 = df.ped %>% 
+  filter(meno.cause.t.f == menotype) 
+  
+mdat2 = data.table(mdat2)
+names(mdat2)
+part.nums = mdat2[, .(number_of_distinct_ids = uniqueN(censor_id)), by=ped_status ] # total unique ids by case status
+n.cases = as.numeric(part.nums[2,2]); n.cases # number of cases 
+py = with(mdat2, sum(tend-tstart)); py # person-years
+py.info = data.frame(n=n.cases, py=py)
+rm(mdat2)  
+  
+
+mdat = df.ped %>% 
+  select(-censor_id) %>%
+  filter(meno.cause.t.f == menotype) 
+
+# 2. PAM with different hazards by cohort, stratification by cohort.
+# ==================================
+
+pam.strat <- bam(ped_status ~ s(tend) + cohort.f + s(tend, by=cohort.f),
+        data = mdat, 
+        offset = offset, 
+        family = poisson, 
+        method = "fREML", 
+        discrete = TRUE)
+
+
+# 3. Check the stratified hazard functions with cox ph
+# ====================================================
+
+# source: https://adibender.github.io/pammtools/articles/strata.html
+
+# Look at stratified Cox model
+
+cph  <- coxph(Surv(tstart, tend, ped_status) ~ strata(cohort.f), data=mdat)
+base <- basehaz(cph) # returns cumhaz
+
+baseline_gg <- ggplot(base, aes(x=time)) +
+  geom_step(aes(y=hazard, group=strata)) +
+    ylab(expression(hat(Lambda)(t))) + xlab("t")
+
+# baseline_gg + aes(col=strata)
+
+
+# 4. Look at PAM
+# ==================================
+
+# PAM with different hazards by cohort, stratification by cohort.
+
+pinf <- mdat %>%
+  group_by(cohort.f) %>%
+  add_hazard(pam.strat) %>%
+    rename(strata=cohort.f) 
+
+head(data.frame(pinf), 20)
+tail(data.frame(pinf))
+
+# select out unique values for hazard so it's not adding multiple identical hazards across id
+pinf2 = unique(pinf[,c("tend", "hazard", "strata")])
+pinf2 = pinf2 %>% group_by(strata) %>% mutate(cumhaz = cumsum(hazard))
+head(pinf2[pinf2$strata==27,]) # check
+
+test.plot = baseline_gg + aes(col="Nelson-Aalen") +
+    geom_step(data=pinf2, aes(x=tend, y=cumhaz, group=strata, col="PAM")) +
+#  geom_ribbon(data=pinf, aes(x=tend, ymin=cumu_lower, ymax = cumu_upper,
+#    group=strata), fill = "black", col = NA, alpha = .2) +
+    facet_wrap(~strata, ncol=1) +
+    scale_color_manual(name="Method", values=c(Set1[1], "black")) +
+  theme(legend.position = "bottom")
+
+
+# 4. add time-dept variable
+# ==================================
+pam2 <- update(pam.strat, . ~ . + bmi)
+summary(pam2)
+
+# 5. add time-dept coefficient
+# ===============================
+pam3 <- update(pam.strat, . ~ . + s(tend, by=bmi))
+summary(pam3)
+
+# 6. add linear BMI change over time
+# ==================================
+pam4 <- update(pam.strat, . ~ . + bmi + bmi:t)
+
+# create model summaries
+# ====================================
+summ.pam.strat = summary(pam.strat)
+summ.pam2 = summary(pam2)
+summ.pam3 = summary(pam3)
+summ.pam4 = summary(pam4)
+
+test.mods = anova(pam.strat, pam2, pam4, pam3, test="Chisq") # test time dept coefficient vs no change
+test.mods.2 = AIC(pam.strat, pam2, pam4, pam3)
+
+# 6. can check the time varying coefficients in pamm vs coxph just as the base hazards above,
+# here  https://adibender.github.io/pammtools/articles/tveffects.html
+# =====================================================================
+
+mdat$cohort.f = factor(mdat$cohort.f) # use factor to remove groups with missing values
+
+# Cox PH
+vfit <- coxph(
+  formula = Surv(tstart, tend, ped_status) ~ bmi + tt(bmi),# + strata(cohort.f), # NOTE: get an error if you do strata with time-dept bmi
+  data    = mdat,
+  tt      = function(x, t, ...) x * t)
+coef(vfit)
+
+
+
+# NOte: ped_info() function takes average of variables so t is averaged. need to recalculate based on tstart/tend.
+
+
+term.df <- mdat %>% ped_info() %>% 
+  add_term(pam3, term = "bmi") %>%
+  mutate_at(c("fit", "ci_lower", "ci_upper"), funs(. / .data$bmi)) %>%
+  mutate( t = (tstart-46) + (tend - tstart) ) %>% # age range from 45 to 55  
+  mutate(
+        cox.fit = coef(vfit)["bmi"] + coef(vfit)["tt(bmi)"] * tend,
+        pam0.fit = coef(pam2)["bmi"],
+        pam.l.fit = coef(pam4)["bmi"] + coef(pam4)["bmi:t"] * t)
+
+# source: https://adibender.github.io/pammtools/articles/tveffects.html
+# plot
+gg_tv = ggplot(term.df, aes(x = tend, y = fit)) +
+    geom_step(aes(col = "PAM with penalized spline")) +
+    geom_stepribbon(aes(ymin = ci_lower, ymax = ci_upper), alpha = 0.2) +
+#    geom_line(aes(y = cox.fit, col = "Cox with log-transform")) +
+    geom_line(aes(y = pam0.fit, col = "PAM constant")) +
+    geom_line(aes(y = pam.l.fit, col = "PAM linear")) +
+    scale_color_manual(name = "Method", values = c(Set1[1:3], "black")) +
+    xlab("t") + ylab(expression(hat(f)(t)))
+
+gg_tv
+
+# updated figure with confidence intervals around best fitting model, constant
+# ==================================================
+
+# redo figure so it has confidence interval for best-fitting model, the constant BMI HR over age-time
+
+
+# the constant and linear
+term.df.update <- mdat %>% ped_info() %>% 
+  add_term(pam2, term = "bmi") %>%
+  mutate_at(c("fit", "ci_lower", "ci_upper"), funs(. / .data$bmi)) %>%
+  mutate( t = (tstart-46) + (tend - tstart) ) %>% # age range from 45 to 55  
+  mutate(
+        cox.fit = coef(vfit)["bmi"] + coef(vfit)["tt(bmi)"] * tend,
+        pam.l.fit = coef(pam4)["bmi"] + coef(pam4)["bmi:t"] * t)
+head(term.df)
+
+# the spline
+term.df2.update <- mdat %>% ped_info() %>% 
+  add_term(pam3, term = "bmi") %>%
+  mutate_at(c("fit", "ci_lower", "ci_upper"), funs(. / .data$bmi))
+
+# make plot
+
+gg_tv.update = ggplot(term.df.update, 
+                      aes(x = tend, y = exp(fit), col="Constant")) +
+  geom_line() +
+   geom_ribbon(aes(ymin = exp(ci_lower), ymax = exp(ci_upper),
+                   col="Constant"),
+               fill = "black", 
+               alpha = 0.1) +
+    geom_line(aes(y = exp(pam.l.fit),
+                  col="Linear")) +
+    geom_step(data=term.df2.update, 
+              aes(x=tend, y=exp(fit),
+                  col = "Spline")) +
+    geom_stepribbon(data=term.df2.update, 
+                    aes(ymin = exp(ci_lower),
+                        ymax = exp(ci_upper),
+                        col="Spline"),
+                    fill = Set1[[3]], 
+                    alpha = 0.1) +
+  scale_colour_manual(
+    name = "Method",
+    values = c("Constant"=Set1[[1]],
+               "Linear" = Set1[[2]],
+               "Spline" = Set1[[3]])) + # https://stackoverflow.com/questions/10349206/add-legend-to-ggplot2-line-plot
+    xlab("Age (years)") + ylab("BMI breast cancer HR") +
+  theme_bw(base_size=15)
+
+
+# LOOK AT ORIGINAL FIXED BMI values for comparison
+# ================================================
+# ================================================
+
+# 7. add fixed BMI
+# ==================================
+pam2.f <- update(pam.strat, . ~ . + BMI_t00)
+
+# 8. add time-dept coefficient for fixed BMI
+# ===============================
+pam3.f <- update(pam.strat, . ~ . + s(tend, by=BMI_t00))
+
+test.mods.f = anova( pam2.f, pam3.f, test="Chisq") # test time dept coefficient vs no change
+test.mods.f2 = AIC(pam.strat, pam2.f, pam3.f)
+
+# 9. can check the time varying coefficients in pamm vs coxph just as the base hazards above,
+# here  https://adibender.github.io/pammtools/articles/tveffects.html
+# =====================================================================
+
+# Cox PH
+vfit.f <- coxph(
+  formula = Surv(tstart, tend, ped_status) ~ BMI_t00 + tt(BMI_t00),# + strata(cohort.f), # NOTE: get an error if you do strata with time-dept bmi
+  data    = mdat,
+  tt      = function(x, t, ...) x * t)
+
+# PAM
+
+term.df.f <- mdat %>% ped_info() %>% 
+  add_term(pam3.f, term = "BMI_t00") %>%
+  mutate_at(c("fit", "ci_lower", "ci_upper"), funs(. / .data$BMI_t00)) %>%
+  mutate(
+        cox.fit = coef(vfit.f)["BMI_t00"] + coef(vfit.f)["tt(BMI_t00)"] * tend,
+        pam0.fit = coef(pam2.f)["BMI_t00"])
+
+# source: https://adibender.github.io/pammtools/articles/tveffects.html
+# plot
+gg_tv.f = ggplot(term.df.f, aes(x = tend, y = fit)) +
+    geom_step(aes(col = "PAM with penalized spline")) +
+    geom_stepribbon(aes(ymin = ci_lower, ymax = ci_upper), alpha = 0.2) +
+    geom_line(aes(y = cox.fit, col = "Cox with log-transform")) +
+    geom_line(aes(y = pam0.fit, col = "PAM constant")) +
+    scale_color_manual(name = "Method", values = c(Set1[1:3], "black")) +
+    xlab("t") + ylab(expression(hat(f)(t)))
+
+gg_tv.f
+
+
+# clean up analysis objects: pam.strat, cph, pam2, pam3, vfit, pam2.f, pam3.f, vfit.f
+
+# pam.strat.c = mf(pam.strat);
+# cph.c = mf(cph)
+# pam2.c = mf(pam2)
+# pam3.c = mf(pam3)
+# vfit.c = mf(vfit)
+# 
+# pam2.f.c = mf(pam2.f)
+# pam3.f.c = mf(pam3.f)
+# vfit.f.c = mf(vfit.f)
+
+list.of.stuff= list(test.mods=test.mods, 
+                    gg_tv=gg_tv,
+                    test.mods.f=test.mods.f, 
+                    gg_tv.f=gg_tv.f, # (1-4)
+              gg_tv.update=gg_tv.update, # 5
+              term.df=term.df, # 6
+              term.df.update=term.df.update,
+              term.df2.update=term.df2.update, # 7-8
+              test.mods.2=test.mods.2,
+              test.mods.f2=test.mods.f2, # AIC (9,10)
+              summ.pam.strat=summ.pam.strat,
+              summ.pam2=summ.pam2, 
+              summ.pam3=summ.pam3, 
+              summ.pam4=summ.pam4, # export model summaries for the time-dependent covariate models (11,12,13,14)
+              py.info=py.info) # cases and person-year info(15)
+
+
+rm(list = setdiff(ls(), c("list.of.stuff", names(list.of.stuff)))) # take out any objects from the environment outside of my stuff so it's not saved in RData file. If I don't then the RData file is huge because it is saving all the data files as well.
+
+# source: https://community.rstudio.com/t/r-regression-model-size-gets-larger-when-being-saved-within-a-function/87609/4
+
+return(list.of.stuff)
+
+}
+
+
+```
+
+
+```{r, eval=T}
+
+
+cleanModel2 = function(cm) {
+  # just in case we forgot to set
+  # y=FALSE and model=FALSE
+  cm$linear.predictors = NULL
+  cm$residuals = NULL
+  cm$y = NULL
+  cm$na.action = NULL
+  cm$fitted.values = NULL
+  cm$weights = NULL
+  cm$working.weights = NULL
+  cm$prior.weights = NULL
+  cm$dw.drho = NULL
+  cm$hat = NULL
+  cm$model = NULL
+  cm$offset = NULL
+  
+  cm$wt = NULL
+  
+  attr(cm$terms,".Environment") = c()
+  attr(cm$formula,".Environment") = c()
+  return(cm)
+}
+
+nat.1 = get.mods(menotype="Natural", Model.fun=cleanModel2)
+ov.1 = get.mods(menotype="Medically induced loss of ovarian function", Model.fun=cleanModel2)
+pre.1 = get.mods(menotype="Premenopausal", Model.fun=cleanModel2)  # premenopause does not work unless you restrict to cohorts with > 30 events
+surg.1 = get.mods(menotype="Surgical menopause", Model.fun=cleanModel2) # NOTE that this fails due to no events (or no cohorts with events>30)
+
+```
+
+```{r, eval=T}
+
+save(nat.1, ov.1, pre.1,
+     surg.1, 
+     file="bmi-time2-v6update.RData")
+
+```
+
+
+```{r, eval=T}
+# R on slurm is saving the environment from previous run. Remove all objects from this run so not in memory next time I open R environment.
+rm(list=ls()) 
+gc()
+
+```
+

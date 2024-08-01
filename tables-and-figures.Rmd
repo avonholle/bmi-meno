@@ -1,0 +1,604 @@
+---
+author: "Ann Von Holle"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: united
+    toc: no
+  pdf_document:
+    includes:
+      in_header: ../../preamble-latex-nobookdown.tex
+    number_sections: yes
+    toc: no
+    highlight: tango
+urlcolor: blue
+linkcolor: blue
+citecolor: blue
+link-citations: yes
+geometry: margin=1.25cm
+always_allow_html: true
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r, include=FALSE}
+
+# Change to eval=T if you want to re-run w/ new data. Note that having this set to T, the report won't print if there are image files inserted into the bookdown document, but all the .Rmd child files will run. For example, the .png files from section2.Rmd will not print because this bookdown report will be looking for the .png files in the child scripts located in a different folder than the bookdown report where this script lives. For new data, need to run with eval=T to re-run all R scripts then re-run with eval=F to create report.
+knitr::opts_chunk$set(echo = F, 
+                      eval = F, # if need to re-run change to T
+#                      fig.width=10,
+#                      fig.height=5,
+#                      fig.cap=T,
+                      message=F,
+                      float=F,
+                      fig.pos="H",
+                      results = 'hide', # hide all results
+                      warning = F)
+
+```
+
+
+```{r, include=F, eval=T}
+
+require(knitr)
+require(kableExtra)
+require(data.table)
+require(ggplot2)
+library(dplyr)
+library(tidyr)
+library(plyr)
+#library(expss) # https://cran.r-project.org/web/packages/expss/vignettes/labels-support.html
+# NOTE: expss seems to mask a a lot of functions from other packages listed here.
+
+require(tidyverse)
+
+# https://stackoverflow.com/questions/53678412/make-na-values-in-table-just-blank-cells-when-using-cell-spec-in-kableextra
+options(knitr.kable.NA = '')
+
+```
+
+
+<!-- NOTES:  -->
+
+<!-- Note: all scripts run on server with submit-2.sh, which runs run-file1.R -->
+
+
+```{r,  results='markup', eval=T}
+
+load("table1-sub.RData") # from section1.Rmd
+#colnames(dat)
+dim1 = dim(dat)[2]-2
+
+newdat = dat[,c(dim(dat)[2],1:dim1)]
+colnames(newdat)[1] = ""
+
+# source: https://stackoverflow.com/questions/71560787/add-commas-every-digits-in-numbers-of-kable
+newdat = apply(newdat, 2, function(x) prettyNum(x, big.mark = ","))
+
+# replace all NA in table with blank
+newdat[newdat == "               NA"] = " "
+
+# remove median IQR notation and put in footer.
+
+
+kable(newdat[,c(1, ncol(newdat))],
+      row.names=F,
+      booktabs=T,
+      caption="Descriptive statistics for analytic sample",
+      escape=F,
+      longtable=T,
+      linesep = "",
+      align=c('l', rep('c', 2), 'l')) %>%
+  kable_styling(latex_options = c("scale_down", "striped"), 
+                font_size=10,
+                full_width = F) %>%
+  add_indent(c(10:12, 14:18, 20:23 )) %>%
+  column_spec(1, width = "25em") %>%
+  column_spec(2, width = "12em") %>%
+  footnote(general = c("All age variables are in year units, continuous variables are characterized by median [interquartile range], and categorical variables are characterized by number of observations (percent)"),
+           threeparttable = T)
+
+```
+
+
+```{r, eval=T}
+
+# Load data from programs to be run in subsequent chunks. 
+
+load(file="results.RData") # objects t2, t3 from bmi-time-dept-table.Rmd
+# t2 has regression coefficients and t3 has AIC
+
+names(t2)
+t2[,c(1,5:6)]
+
+# t2.rev = t2[c("meno", 
+#            "coef.ci_orig", 'p.vals_orig', "coef.ci2_orig", 'p.vals2_orig')]
+#t2.rev
+
+levels(factor(t2$meno))
+
+t2$p.vals_orig = ifelse(t2$p.vals_orig=="  NA", "1.000", t2$p.vals_orig)
+class(t2$meno)
+table(t2$meno)
+
+t2$meno = factor(t2$meno,
+                 levels = c("Premenopausal",
+                            "Hysterectomy without bilateral oophorectomy",
+                            "Natural",
+                            "Ovarian"),
+                     labels =c("Premenopausal",
+                            "Hysterectomy without bilateral oophorectomy",
+                            "Natural",
+                            "Loss of ovarian function"))
+
+levels(t2$meno)
+table(t2$meno)
+
+```
+
+\clearpage
+\newpage
+
+<!-- NOTE: you have to put the caret notation in dollar signs or I will get an error when outputting to latex pdf. -->
+
+\blandscape
+
+```{r, results="markup", eval=T}
+
+kable(t2[order(t2$meno),
+         c("meno",
+           "n_orig",
+           "py_orig",
+           "coef.ci_orig",
+           'p.vals_orig',
+           "coef.ci0_orig",
+           "coef.ci2_orig",
+           'p.vals2_orig',
+           "est.45_orig",
+           "est.50_orig",
+           "est.54_orig")],
+      booktabs=T, 
+      col.names = c("Menopause status", 
+                    "n, cases", 
+                    "person-years",
+                    rep(c("HR (95\\% CI)", 
+                          "p-value$^b$", 
+                          "linear HR intercept term$^c$ (95\\% CI)",
+                          "linear HR slope term$^d$ (95\\% CI)",
+                          "p-value$^e$"), 1),
+                    "HR at age 45",
+                    "HR at age 50",
+                    "HR at age 54"),
+      escape=F,
+#      longtable=F,
+      row.names=F,
+       caption="Breast cancer hazard ratios (HRs) per 5-unit change in BMI by model type") %>%
+  column_spec(1, width = "6em") %>%
+  column_spec(c(2,3), width = "5em") %>%
+  column_spec(c(4,6,7,8,9,10,11), width = "6em") %>%
+  column_spec(c(5,8), width = "3em") %>%
+  kable_styling(font_size=10, latex_options = c("striped")) %>% #, latex_options="scale_down"  
+  add_header_above(c(" " = 3, 
+                     "Model 1: Constant BMI" = 2,
+                     "Model 2: Linear BMI" = 3,
+                     "Model 3: HR estimates based on spline model" = 3)) %>%
+  add_footnote(c("All analyses are stratified by cohort.",
+                 "p-value for Chi-square test for difference from null model (no BMI term).",
+                 "HR at age 45 years",
+                 "Ratio of HR for a one-year change in age-time.",
+                 "p-value for Chi-square test for difference from constant BMI model."),
+               escape=F,
+#               notation="none",
+               threeparttable = TRUE)
+
+```
+
+
+
+\clearpage
+\newpage
+
+
+```{r, results='markup', eval=T}
+
+load(file="results-v6update-strata.RData") # t2.v6.strata from bmi-time-dept-table-strata-v6.Rmd
+
+#levels(factor(t2.v6.strata$meno))
+# 
+# t2.v6.strata$meno = factor(t2.v6.strata$meno,
+#                      labels = c("Hysterectomy without bilateral oophorectomy",
+#                                 "Natural",
+#                                 "Loss of ovarian function",
+#                                 "Premenopausal"))
+
+t2.v6.strata$meno = factor(t2.v6.strata$meno,
+                 levels = c("Premenopausal",
+                            "Hysterectomy without bilateral oophorectomy",
+                            "Natural",
+                            "Ovarian"),
+                     labels =c("Premenopausal",
+                            "Hysterectomy without bilateral oophorectomy",
+                            "Natural",
+                            "Loss of ovarian function"))
+
+
+kable(t2.v6.strata[order(t2.v6.strata$meno),
+                         c("meno", 
+           "i.n_Yes",
+           "py_Yes",
+           "coef.ci_Yes", 
+           'p.vals_Yes', 
+           "coef.ci0_Yes",
+           "coef.ci2_Yes", 
+           'p.vals2_Yes',
+           "i.n_No",
+           "py_No",
+           'coef.ci_No',
+           'p.vals_No', 
+           "coef.ci0_No",
+           'coef.ci2_No', 
+           'p.vals2_No')],
+      booktabs=T, 
+      col.names = c("Menopause status", 
+                    "n, cases", 
+                    "person-years",
+                    "HR (95\\% CI)", 
+                    "p-value$^b$", 
+                    "linear HR intercept term$^c$ (95\\% CI)",
+                    "linear HR term$^d$ (95\\% CI)",
+                    "p-value$^e$",
+                    "n, cases", 
+                    "person-years",
+                    "HR (95\\% CI)", 
+                    "p-value$^b$", 
+                    "linear HR intercept term$^c$ (95\\% CI)",
+                    "linear HR term$^d$ (95\\% CI)",
+                    "p-value$^e$"),
+      escape=F,
+      longtable=F,
+      row.names=F,
+      caption="Breast cancer hazard ratios (HRs) per 5-unit change in BMI by overweight (BMI>=25 kg/m2) strata at age 18-24 years") %>% 
+ #https://stackoverflow.com/questions/46085067/r-markdown-table-caption-width-with-kable-and-longtable
+  #landscape() %>%
+  column_spec(1, width = "6em") %>%
+  column_spec(c(2,3,5,8,9,10,12,15), width = "3em") %>%
+  column_spec(c(4,6,7,11,13,14), width = "5em") %>%
+  add_header_above(c(" " = 3,
+                     "Model 1: Constant BMI" = 2,
+                     "Model 2: Linear BMI" = 3,
+                     " "=2,
+                     "Model 1: Constant BMI" = 2,
+                     "Model 2: Linear BMI" = 3)) %>%
+  add_header_above(c(" " = 1, 
+                     "Overweight at ages 18-24 years" = 7,
+                     "Not overweight at ages 18-24 years" = 7)) %>%  
+#  kable_styling(latex_options = c("scale_down", "striped"), full_width = F) %>%
+  kable_styling(font_size=9, latex_options = c("striped")) %>% #, latex_options="scale_down"
+  add_footnote(c("All analyses are stratified by cohort.",
+                 "p-value for Chi-square test for difference from null model (no BMI term).",
+                 "HR at age 45 years",
+                 "Ratio of HR for a one-year change in age-time.",
+                 "p-value for Chi-square test for difference from constant BMI model."),
+               escape=F,
+#               notation="none",
+               threeparttable = TRUE)
+
+
+```
+
+Note: The cohorts in this analytic sample were: `r load(file="results-v6update.RData"); paste0(c6$cohorts.in.v6, sep = ",", collapse=" ")`
+
+
+\clearpage
+\newpage
+
+```{r, results='markup', eval=T}
+
+load(file="results-v7update.RData") # t2.v7, t3.v7, c7 from bmi-time-dept-table-v7.Rmd
+# levels(factor(t2.v7$meno))
+
+t2.v7$meno = factor(t2.v7$meno,
+                 levels = c("Premenopausal",
+                            "Hysterectomy without bilateral oophorectomy",
+                            "Natural",
+                            "Ovarian"),
+                     labels =c("Premenopausal",
+                            "Hysterectomy without bilateral oophorectomy",
+                            "Natural",
+                            "Loss of ovarian function"))
+
+# t2.v7$meno = factor(t2.v7$meno,
+#                     labels = c("Hysterectomy without bilateral oophorectomy$^f$",
+#                                "Natural",
+#                                "Loss of ovarian function$^f$",
+#                                "Premenopausal"))
+
+kable(t2.v7[order(t2.v7$meno),
+            c("meno",
+           "i.n_orig",
+           "py_orig",
+           "coef.ci_orig", 'p.vals_orig', 
+           "coef.ci0_orig",
+           "coef.ci2_orig", 'p.vals2_orig',
+           "i.n_hrt",
+           "py_hrt",
+           'coef.ci_hrt', 'p.vals_hrt',
+           "coef.ci0_hrt",
+           'coef.ci2_hrt', 'p.vals2_hrt')],
+      booktabs=T, 
+      col.names = c("Menopause status", 
+                    "n, cases", 
+                    "person-years",
+                    "HR (95\\% CI)", 
+                    "p-value$^b$", 
+                    "linear HR intercept term$^c$ (95\\% CI)",
+                    "linear HR term$^d$ (95\\% CI)",
+                    "p-value$^e$",
+                    "n, cases", 
+                    "person-years",
+                    "HR (95\\% CI)", 
+                    "p-value$^b$", 
+                    "linear HR intercept term$^c$ (95\\% CI)",
+                    "linear HR term$^d$ (95\\% CI)",
+                    "p-value$^e$"),
+      escape=F,
+      longtable=F,
+      row.names=F,
+      caption="Breast cancer HRs$^a$ per 5-unit change in BMI by menopausal hormone therapy status") %>% #https://stackoverflow.com/questions/46085067/r-markdown-table-caption-width-with-kable-and-longtable
+  #landscape() %>%
+  column_spec(1, width = "7em") %>%
+  column_spec(c(2,3,5,8,9,10,12,14), width = "3em") %>%
+  column_spec(c(4,6,7,11,13), width = "5em") %>%
+  add_header_above(c(" " = 3,
+                     "Model 1: Constant BMI" = 2,
+                     "Model 2: Linear BMI" = 3,
+                     " "=2,
+                     "Model 1: Constant BMI" = 2,
+                     "Model 2: Linear BMI" = 3)) %>%
+  add_header_above(c(" " = 1, 
+                     "Cohorts with information on HRT use" = 7,
+                     "Restricted to no menopausal hormone therapy" = 7)) %>% 
+  collapse_rows(columns =1)  %>%
+#  kable_styling(latex_options = c("scale_down", "striped"), full_width = F) %>%    
+  kable_styling(font_size=9, latex_options = c("striped")) %>% #, latex_options="scale_down"
+  add_footnote(c("All analyses are stratified by cohort.",
+                 "p-value for Chi-square test for difference from null model (no BMI term).",
+                 "HR at age 45 years",
+                 "Ratio of HR for a one-year change in age-time.",
+                 "p-value for Chi-square test for difference from constant BMI model.",
+                 "Insufficient sample size for estimates restricting to no menopausal hormone therapy"),
+               escape=F,
+#               notation="none",
+               threeparttable = TRUE) 
+
+```
+
+\vspace{-1cm}
+Note: The cohorts in this analytic sample were: `r load(file="results-v7update.RData"); paste0(c7$cohorts.in.v7, sep = ",", collapse=" ")`
+
+
+
+\elandscape
+
+\clearpage
+\newpage
+
+# Supplemental materials
+
+<div id="refs"></div>
+
+\beginsupplement
+
+\blandscape
+
+```{r,  results='markup', eval=T}
+
+load("table1-sub.RData") # from section1.Rmd
+#colnames(dat)
+dim1 = dim(dat)[2]-2
+
+newdat = dat[,c(dim(dat)[2],1:dim1)]
+colnames(newdat)[1] = ""
+
+kable(newdat,
+      row.names=F,
+      booktabs=T,
+      caption="Descriptive statistics for analytic sample by cohort",
+      escape=F,
+      linesep = "",
+       align=c('l', rep('c', 2), 'l')) %>%
+  kable_styling(latex_options = c("scale_down", "striped"), full_width = F) %>%
+  add_indent(c(10:13, 15:19, 21:24 )) %>%
+  column_spec(1, width = "9em") %>%
+  column_spec(2:dim1, width = "5em") %>%
+  footnote(alphabet = c("All age variables are in year units and continuous variables are characterized by median [interquartile range]."),
+           threeparttable = T)# %>%
+  #landscape()
+
+```
+
+\elandscape
+
+
+\clearpage
+\newpage
+
+
+
+```{r, results="markup", eval=T}
+
+# levels(factor(t3$meno))
+
+
+# t3$meno = factor(t3$meno,
+#                      labels = c("Natural",
+#                                 "Loss of ovarian function",
+#                                 "Hysterectomy without bilateral oophorectomy",
+#                                 "Premenopausal"))
+
+t3$meno = factor(t3$meno,
+                 levels = c("Premenopausal",
+                            "Hysterectomy without bilateral oophorectomy",
+                            "Natural",
+                            "Ovarian"),
+                     labels =c("Premenopausal",
+                            "Hysterectomy without bilateral oophorectomy",
+                            "Natural",
+                            "Loss of ovarian function"))
+
+
+#load(file="results.RData") # objects t2, t3 from bmi-time-dept-table.Rmd
+# t2 has regression coefficients and t3 has AIC
+
+kable(t3[order(t3$meno),1:5],
+      col.names = c("Menopause status", rep(c("Null", 'Constant', 'Linear', 'Spline'), 1)),
+      format.args = list(big.mark = ","),
+      booktabs=T,
+      escape=F,
+      longtable=F,
+      row.names=F,
+      caption="AIC for different models of BMI breast cancer HRs by menopause status and type of model") %>% #https://stackoverflow.com/questions/46085067/r-markdown-table-caption-width-with-kable-and-longtable
+  #landscape() %>%
+#    add_header_above(c(" " = 1, 
+#                     "Unadjusted" = 4,
+#                     "Adj. for BMI 18-24 years" = 4,
+#                     "No HRT at entry" = 4)) %>%
+  column_spec(1, width = "10em") %>%
+  collapse_rows(columns=1, valign= "top") %>%
+  kable_styling(font_size=12, latex_options = c("striped", "hold_position"))
+
+```
+
+\clearpage
+\newpage
+
+\blandscape
+
+```{r, results='markup', eval=T}
+
+# results from sensitivity analysis using time since menopause
+# in the ../consortium-extra-2023/ folder
+
+load(file="../consortium-extra-2023/t2.RData") # objects t2 from ../consortium-extra-2023/bmi-time-dept-table.Rmd
+
+
+t2 = within(t2, {
+  p.vals_orig = ifelse(meno=="Natural", ">0.99",
+                      ifelse(meno=="Premenopausal", "<0.001", p.vals_orig))
+  #meno = ifelse(meno=="Ovarian", "Loss of ovarian function", meno)
+})
+
+
+t2$meno = factor(t2$meno,
+                 levels = c("Premenopausal",
+                            "Hysterectomy without bilateral oophorectomy",
+                            "Natural",
+                            "Ovarian"),
+                     labels =c("Premenopausal",
+                            "Hysterectomy without bilateral oophorectomy",
+                            "Natural",
+                            "Loss of ovarian function"))
+
+t2 = t2[order(t2$meno) & !t2$meno=="Premenopausal",]
+
+# t2 has regression coefficients 
+kable(t2[,c("meno",
+           "n_orig",
+           "py_orig",
+           "coef.ci_orig",
+           'p.vals_orig',
+           "coef.ci0_orig",
+           "coef.ci2_orig",
+           'p.vals2_orig'
+           )],
+      booktabs=T, 
+      col.names = c("Menopause status", 
+                    "n, cases", 
+                    "person-years",
+                    rep(c("HR (95\\% CI)", 
+                          "p-value$^b$", 
+                          "linear HR intercept term$^c$ (95\\% CI)",
+                          "linear HR slope term$^d$ (95\\% CI)",
+                          "p-value$^e$"), 1)
+                    ),
+      escape=F,
+#      longtable=F,
+      row.names=F,
+      caption="BMI breast cancer hazard ratios by model type using time since menopause for time scale$^a$") %>%
+  column_spec(1, width = "10em") %>%
+  column_spec(c(2,3), width = "5em") %>%
+  column_spec(c(4,6,7), width = "7em") %>%
+  column_spec(c(5,8), width = "6em") %>%
+#  column_spec(c(5,7), width = "5em") %>%
+  add_header_above(c(" " = 3, 
+                     "Model 1: Constant BMI" = 2,
+                     "Model 2: Linear BMI" = 3)) %>%#,
+#                     "Model 3: HR estimates based on spline model" = 3)) %>%
+  kable_styling(font_size=12) %>%  #latex_options="scale_down"
+  add_footnote(c("All analyses are stratified by cohort, adjusted for age at menopause (or age at entry in cohort for the premenopausal group), and apply to first ten years.",
+                 "p-value for Chi-square test for difference from null model (no BMI term).",
+                 "HR at start of menopause or entry into study (premenopausal group)",
+                 "Ratio of HR for a one-year change in time.",
+                 "p-value for Chi-square test for difference from constant BMI model."),
+               escape=F,
+#               notation="none",
+               threeparttable = TRUE)
+
+```
+
+\elandscape
+
+\clearpage
+\newpage
+
+
+<!-- NOTE: I made this diagram using LaTeX code: ~\National Institutes of Health\NIEHS-Von Holle BCBB Postdoctoral work - General\bmi-menopause\consortium-analysis\consortium-analysis-2021-update\flow-chart.tex, which I then copy as an image from the pdf and put in this folder as 'flow-chart.PNG'.
+NOTE: I keep the sample size info from sample-bmi-time-dept-datahandling.Rmd in https://nih.sharepoint.com/sites/NIEHS-Von-Holle-BCBB-Postdoc/Shared Documents/General/bmi-menopause/consortium-analysis/consortium-analysis-2021-update/flowchart.xlsx to populate the .tex file above.-->
+
+
+![Participant flow diagram](flow-chart.PNG)
+
+\clearpage
+\newpage
+
+<!-- NOTE: next 2 figures from meta-check.Rmd  -->
+
+![Meta-analyses of BMI ln(HR) linear slope term over age-time by study.](forestplot-slope.png){ height=90% }
+
+\clearpage
+\newpage
+
+![Meta-analyses of constant BMI ln(HR) term over age-time by study.](forestplot-int.png){ height=90% }
+
+
+\clearpage
+\newpage
+
+
+<!-- Source: bmi-time-dept-figs-v3.Rmd -->
+
+![BMI breast cancer hazard ratios by menopause status and model type over age time](Updated.png){ height=100%}
+
+
+<!-- \clearpage -->
+<!-- \newpage -->
+
+
+<!-- ![BMI breast cancer hazard ratios by menopause status and model type over age-time adjusted for early life BMI at ages 18-24 years](Updated-v6.png){ height=100% } -->
+
+
+<!-- \clearpage -->
+<!-- \newpage -->
+
+<!-- ![BMI breast cancer hazard ratios by menopause status and model type over age-time restricted to sample of women who did not report hormone replacement therapy use at study entry.](Updated-v7.png){ height=100% } -->
+
+<!-- Notes on other data in manuscript. -->
+
+<!-- 1. The median number of BMI observations in the sample are calculated in sample-bmi-time-dept-datahandling.Rmd. -->
+<!-- Search for the chunk with the following comment: # get median number of bmi measures per person in analytic sample
+-->
+
+<!-- 2. The number of women who have postmenopausal person-time but enter as premenopausal can also be found in sample-bmi-time-dept-datahandling.Rmd -->
+<!-- Search for the chunk with the following comment: # how many people are premenopausal at baseline, but have postmenopausal person-time in sample? -->
+

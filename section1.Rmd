@@ -1,0 +1,560 @@
+---
+title: 'Table 1: Descriptive statistics for included cohorts'
+output: 
+  html_document:
+    toc: true # table of content true
+    toc_depth: 3  # upto three depths of headings (specified by #, ## and ###)
+    number_sections: true  ## if you want number sections at each table header
+    theme: united  # many options for theme, this one is my favorite.
+    highlight: tango  # specifies the syntax highlighting style
+geometry: margin=1cm
+---
+
+<!-- NOTE: based on ../../../tables/table1-redo.Rmd -->
+
+```{r setup-table1, include=FALSE}
+knitr::opts_chunk$set(echo = T, 
+                      eval = T, # change to T if you want to re-run w/ new data
+                      results = 'hide',
+                      warning = F)
+
+```
+
+
+```{r, include=F, eval=TRUE}
+
+# bring in packages
+require(knitr)
+require(haven)
+require(survival)
+require(data.table)
+require(tableone)
+require(ggplot2)
+require(kableExtra)
+require(dplyr)
+
+```
+
+
+```{r, eval=T}
+
+# R on slurm is saving the environment from previous run. Remove all objects from prior runs to clear up memory so I can run this script.
+rm(list=ls()) 
+gc()
+
+```
+
+
+```{r, include=F}
+
+load(file="bmidat-pamm.RData") # objects: df.ped from W:\projects\bmi-menopause\consortium-analysis\consortium-analysis-2021-update\sample-bmi-time-dept-datahandling.Rmd
+# these data are in counting style.
+ids = unique(df.ped$censor_id)
+length(ids)
+names(df.ped)
+table(df.ped$ped_status)
+
+load(file="subset.RData") # df2.sub: data with all participants and subset of variables (before data handling) also from sample-bmi-time-dept-datahandling.Rmd
+load(file="dat-fortable1.RData") # df from sample-bmi-time-dept-datahandling.Rmd
+dim(df)
+table(df$event)
+
+length(unique(df$censor_id))
+
+# dim(df2.sub)
+# NOTE: I used the following approach for my initial table 1. However, using the following approach to subset individual info from the analysis data set does not work (keeping ids from those present in the counting style analysis data set. There are some people included in the analysis for some menopause groups/person-time but not others. If that id is excluded from a postmenopause group in which the event occurs, we are not analyzing that person-time in which the event occurs for that person.
+# in addition to people, I subset person-time and although both data sets have the same number of people, the events, coming from different sets of person-time, are not the same.
+
+# Will have to use the data frame I used to create the counting style data instead
+
+#df.check = df2.sub[which(df2.sub$censor_id %in% ids),]
+#dim(df.check)
+#names(df.check)
+#table(df.check$event)
+#length(unique(df.check$censor_id))
+
+
+# example of an id that is not in the analysis data set with person-time including that event
+
+# with(df, summary(ceiling.censor-floor.entry))
+# with(df, summary(ceiling.censor))
+# with(df, summary(floor.entry))
+# with(df[df$floor.entry>40,], summary(ceiling.censor-floor.entry))
+
+# add tstart and tend from df.ped object that is used for analyses
+# get unique min(tstart) and max(tend) from each person in data set
+
+df.ped.subset = data.frame(df.ped) %>% 
+  select(censor_id, tstart, tend)
+
+# use data.table since data frame is so large and takes time.
+max = setDT(df.ped.subset)[, max(tend), by=censor_id]
+dim(max)
+names(max)[2] = "max"
+
+min = setDT(df.ped.subset)[, min(tstart), by=censor_id]
+dim(min)
+summary(min)
+names(min)[2] = "min"
+
+# merge max and min time onto data frame for descriptive statistics and calculate follow up time
+dim(df)
+dim(min)
+dim(max)
+
+df = merge(df, min, by="censor_id")
+df = merge(df, max, by="censor_id")
+head(df)
+
+with(df, summary(max-min))
+
+
+# create follow up time within window of ages 40-55
+df = within(df, {
+  time.fu = max-min
+})
+
+summary(df$time.fu)
+
+```
+
+```{r, eval=F, include=F}
+# re-run if needed with new data
+# how many different BMI observations are there per person and per cohort
+
+load(file="bmidat.RData") # objects: join2, nomiss.id from sample-bmi-time-dept-datahandling.Rmd
+dim(nomiss.id)
+
+names(join2)
+head(join2[c("censor_id", "bmi", 'bmi.age.orig')], 25)
+
+# Note: BMI is the time-dependent bmi covariate and bmi.age.orig is the age at which the time-dependent bmi covariate was reported.
+# get unique number of bmi.age.orig values per censor_id to determine the number of bmi values per person
+
+# Check number of unique BMI measures per person in sample before most exclusions (join2 has everyone but people missing BMI/age at BMI combo).
+bmi.ct = setDT(join2)[, .(number_of_distinct_bmi = uniqueN(bmi.age.orig)), by=censor_id]
+summary(bmi.ct)
+hist(bmi.ct$number_of_distinct_bmi)
+dim(bmi.ct) # 1,032,646 people
+
+# Check number of unique BMI measures per person in sample before most exclusions (join2 has everyone but people missing BMI/age at BMI combo).
+bmi.ct2 = setDT(df.ped)[, .(number_of_distinct_bmi = uniqueN(bmi.age.orig)), by=censor_id]
+summary(bmi.ct2)
+hist(bmi.ct2$number_of_distinct_bmi)
+dim(bmi.ct2)
+
+```
+
+```{r, include=F}
+
+# create formatted menopause cause variable based on meno_cause_s
+
+df = within(df, {
+  # meno.status2 = ifelse(is.na(MENO_STATUS), NA,
+  #                       ifelse(MENO_STATUS==3, 1, 0))
+  
+    menop.groups = ifelse(meno_cause_s %in% c(1), "Natural",
+                                              ifelse(meno_cause_s %in% c(3,4), "Hysterectomy without bilateral oophorectomy",
+                                                     ifelse(meno_cause_s %in% c(2,5), "Medically induced loss of ovarian function",
+                                                            #ifelse(meno_cause_s %in% c(6,7), "Other", # NOTE: categories 6 and 7 are not used in analyses. See sample-bmi-time-dept-datahandling.Rmd.
+                                                                   ifelse(meno_cause_s %in% c(111), "Premenopausal", NA)))) # NOTE: this variable no longer has 111 as a response.
+
+      
+  bmi.1824 = WEIGHT_YA_1824/((HEIGHT/100)^2)
+  
+  hrt.status = ifelse(HRT_EVER==2, "No", 
+                      ifelse(HRT_EVER==1, "Yes",
+                             NA))
+  
+  ethnic.f2 = ifelse(as.character(ethnic.f)=="more than 1 reported", "Other", 
+                     ifelse(as.character(ethnic.f)=="other", "Other",
+                            as.character(ethnic.f)))
+  
+  # overweight status
+  bmi.1824.overweight = ifelse(bmi.1824>=25, 1, 0)
+})
+
+table(df$ethnic.f)
+table(df$ethnic.f2)
+table(df$bmi.1824.overweight)
+
+table(df$menop.groups)
+summary(df$bmi.1824)
+# table(df$hrt.status)
+# table(df[df$cohort.f=="17",]$meno.status2, useNA="always")
+# # table(df[df$cohort.f=="17",]$MENO_STATUS, useNA="always")
+# table(df$MENO_STATUS)
+table(df$cohort.f)
+class(df$cohort.f)
+table(df$hrt.status)
+
+table(df$AGE_FB)
+
+```
+
+```{r, eval=F, include=F}
+
+# Note: baseline.menop.status variable doesn't work for cohorts that have missing age at baseline (and postmenopausal)
+
+# Look at people who have no menopause status at baseline but later?
+# 17: E3N
+# 19: Melbourne Collaborative Cohort Study
+# 26: Singapore Chinese Health Study
+
+
+summary(df[df$cohort.f == "19",]) # MENO_STATUS==777
+
+# 17 COHORT is one example of no menopause information at baseline. All info for MENO_STATUS is missing.
+summary(df[df$cohort.f == "17", c("MENO_STATUS", 'meno.status2',
+                                  "MENA_AGE",
+                                  "MENO_AGE", "MENO_CAUSE",
+                                  'MENO_CAUSE_t1',
+                                  'MENO_CAUSE_t2',
+                                  'MENO_CAUSE_t3',
+                                  'MENO_CAUSE_t4',
+                                  'MENO_CAUSE_t5',
+                                  'MENO_CAUSE_t6',
+                                  'MENO_CAUSE_t7',
+                                  'MENO_CAUSE_t8',
+                                  'MENO_AGE_t6',
+                                  'MENO_AGE_t7',
+                                  'BASE_AGE',
+                                  'meno_rule_s'
+                                  )]) # MENO_STATUS==777
+
+summary(df[df$cohort.f == "26", c("MENO_STATUS", "MENA_AGE",
+                                  "MENO_AGE", "MENO_CAUSE",
+                                  'MENO_CAUSE_t1',
+                                  'MENO_CAUSE_t2',
+                                  'MENO_CAUSE_t3',
+                                  'MENO_CAUSE_t4',
+                                  'MENO_CAUSE_t5',
+                                  'MENO_CAUSE_t6',
+                                  'MENO_CAUSE_t7',
+                                  'MENO_CAUSE_t8',
+                                  'MENO_AGE_t6',
+                                  'MENO_AGE_t7',
+                                  'BASE_AGE',
+                                  'meno_rule_s',
+                                  'baseline.menop.status'
+                                  )]) # MENO_STATUS==777
+
+head(df[df$cohort.f == "26", c("MENO_STATUS", "MENA_AGE",
+                                  "MENO_AGE", "MENO_CAUSE",
+                               'BASE_AGE',
+                               'meno.status2',
+                                  'meno_rule_s',
+                                  'baseline.menop.status',
+                                  'MENO_CAUSE_t1',
+                                  'MENO_CAUSE_t2',
+                                  'MENO_CAUSE_t3',
+                                  'MENO_CAUSE_t4',
+                                  'MENO_CAUSE_t5',
+                                  'MENO_CAUSE_t6',
+                                  'MENO_CAUSE_t7',
+                                  'MENO_CAUSE_t8',
+                                  'MENO_AGE_t1',
+                                  'MENO_AGE_t2',
+                                  'MENO_AGE_t3',
+                                  'MENO_AGE_t4',
+                                  'MENO_AGE_t5',
+                                  'MENO_AGE_t6',
+                                  'MENO_AGE_t7',
+                                  'MENO_AGE_t8'
+                                  )]) # MENO_STATUS==777
+
+```
+
+```{r, eval=F, include=F}
+# check on time dept info for cohort 17. make sure no info is using in time before age at menopause is known (not baseline)
+head(df.ped[df.ped$cohort.f==17,], 25)
+
+head(df[df$censor_id == "17_100919", 
+        c("MENO_STATUS", "MENA_AGE",
+                                  "MENO_AGE", "MENO_CAUSE",
+                               'BASE_AGE',
+                               'meno.status2',
+                                  'meno_rule_s',
+                                  'baseline.menop.status',
+                                  'MENO_CAUSE_t1',
+                                  'MENO_CAUSE_t2',
+                                  'MENO_CAUSE_t3',
+                                  'MENO_CAUSE_t4',
+                                  'MENO_CAUSE_t5',
+                                  'MENO_CAUSE_t6',
+                                  'MENO_CAUSE_t7',
+                                  'MENO_CAUSE_t8',
+                                  'MENO_AGE_t1',
+                                  'MENO_AGE_t2',
+                                  'MENO_AGE_t3',
+                                  'MENO_AGE_t4',
+                                  'MENO_AGE_t5',
+                                  'MENO_AGE_t6',
+                                  'MENO_AGE_t7',
+                                  'MENO_AGE_t8'
+                                  )]) # MENO_STATUS==777
+
+df.ped %>%
+  filter(censor_id == "17_100919")
+
+# this example shows that I am only using the person-time with reported at age menopause
+
+```
+
+
+```{r}
+
+# make diff age at fb variable for table
+df$age.fb.cat2 = factor(df$age.fb.cat,
+                        levels=c("[-Inf,0]",
+                                 "(0,20]",
+                                 "(20,24]",
+                                 "(24,29]",
+                                 "(29,55]"))
+levels(df$age.fb.cat2)
+
+# subset to cohorts included in analysis
+# currently with 500+ events and age at menopause observed during follow up.
+#df.sub.last = df[which(df$COHORT %in% c(11, 12, 17, 22, 23, 27, 29, 30, 31)),] # these cohorts are based on cohorts selected from meta-analysis
+# to do: Does the epic study really not have any measures of menopause age after baseline?
+df.sub = df
+df.sub$cohort.f = factor(df.sub$cohort.f) # eliminates missing labels
+```
+
+```{r}
+# label cohorts according to list at Copy of DataRequestTemplateVersion7_PremenopausalBreastcancerGroup_March_2018.xlsx
+# folder: U:\projects\bmi-menopause\documentation-consortium
+
+levels(df.sub$cohort.f)
+
+df.sub$cohort.f2 = factor(df.sub$cohort.f, 
+                         levels = c("11", "12", "13", "15", 
+                                    "17", "18", "19", "22", 
+                                    "23", "24", "26", "27", 
+                                    "28", "30", "31", "34"),
+                         labels = c('Generations Study', # 11
+                                    'California Teachers Study', # 12
+                                    'Canadian Study of Diet, Lifestyle and Health', #13
+                                    "Clue II", #15
+                                    
+                                    'E3N', #17	
+                                    'EPIC', #18, European Prospective Investigation into Cancer and Nutrition
+                                    'Melbourne Collaborative Cohort Study', #19
+                                    "Nurses' Health Study I", #22	 
+
+                                    "Nurses' Health Study II", #23	
+                                    "NYU Women's Health Study", #24	
+                                    "Singapore Chinese Health Study", #26
+                                    "Sister Study", #27
+                                    
+                                    "Southern Community Cohort", #28	
+                                    "US Radiologic Technologists Cohort", #30	
+                                    "Women's Lifestyle and Health Study (Sweden)", #31	
+                                    "Black Women's Health Study" #34
+                                    
+                                    ))
+
+```
+
+```{r}
+
+cont.vars = c( "menop.age.baseline", 
+               "BASE_AGE",
+               "MENA_AGE",
+               'time.fu',
+               "BMI_t00", 
+               'bmi.1824')#'CENSOR_FUPTIME')
+
+cat.vars = c(#"baseline.menop.status",
+             #"meno.status2", # this is old, not updated, variable from data before March 2021
+             'bmi.1824.overweight',
+             "menop.groups",
+             "age.fb.cat2",
+             "ethnic.f2",
+             'hrt.status',
+             "event")
+
+# racial/ethnic coding 1=African ancestry or 'black'; 2=Asian; 3=European Ancestry or 'white'; 4=more than 1 reported; 5=other; 999=n/k
+
+table(df[df$COHORT==23,]$baseline.menop.status)
+table(df[df$COHORT==27,]$baseline.menop.status)
+table(df$bmi.1824.overweight)
+
+vars.sub = c(cont.vars, cat.vars)
+vars.sub[!(vars.sub %in% names(df.sub))]
+names(df.sub)[!((names(df.sub) %in% c(cont.vars, cat.vars)))]
+
+dim(df.sub)
+
+# select out the last row by id, ordered by time -- the demographic characteristics are the same (except for events)
+df.sub.last = df.sub %>%
+  group_by(censor_id) %>%
+  slice_max(order_by = tend, n = 1)
+
+dim(df.sub.last)
+
+```
+
+
+```{r}
+
+t1 = CreateTableOne(vars = c(cont.vars, cat.vars), 
+                        data=df.sub.last,
+                        factorVars = c(cat.vars),
+                        test=FALSE)
+
+n1 = sapply(df.sub.last[c(cont.vars, cat.vars)], function(x) sum(!(is.na(x))))
+n1
+
+n1.miss = sapply(df.sub.last[c(cont.vars, cat.vars)], function(x) sum((is.na(x))))
+n1.miss
+
+t1.mat <- print(t1, nonnormal = cont.vars,
+                quote = FALSE, noSpaces = TRUE, printToggle = FALSE,
+                catDigits=1, contDigits=1)
+
+t1.mat
+
+tot.mat = dim(t1.mat)[1]
+
+t1.mat = cbind(t1.mat, c(NA, n1.miss[1:6], rep(NA, tot.mat-7)))
+t1.mat
+
+```
+
+
+```{r}
+
+# Create stratified table
+t1.strat = CreateTableOne(vars = c( cont.vars, cat.vars), 
+                        data=df.sub.last,
+                        factorVars = c(cat.vars),
+                        test=FALSE,
+                        strata='cohort.f2')
+
+t1.strat.2 <- print(t1.strat, nonnormal = cont.vars,
+                    catDigits=1, contDigits=1,
+                    quote = FALSE, noSpaces = TRUE, printToggle = FALSE)
+
+t1.strat.2
+
+df.sub.last.check = df.sub.last[which(df.sub.last$COHORT==17),]
+dim(df.sub.last)
+
+table(df.sub.last.check$baseline.menop.status) # this variable only has 1. no 0.
+table(df.sub.last.check$MENO_STATUS)
+table(df.sub.last.check$min.cause)
+table(df.sub.last.check$MENO_AGE_t1)
+#sapply(df.sub.last.check[menop.vars.t], table)
+
+```
+
+
+```{r}
+# combine stratified and total
+
+tot = cbind(t1.strat.2, t1.mat); tot
+
+```
+
+
+```{r}
+
+t.tot = as.data.frame(tot)
+
+t.tot$vars = c("Number of women",
+               "Age at menopause (at baseline)",
+               "Participant age at entry",
+               "Age at menarche",
+               "Follow-up time (years) between age 45-55 years",
+               "BMI",
+               "BMI, 18-24 years",
+               "BMI>=25 kg/m$^2$, 18-24 years",
+#               "Menopause status, baseline, no. (\\%)",
+               "Cause of menopause, baseline",
+               "Hysterectomy without bilateral oophorectomy",
+               "Medically induced loss of ovarian function",
+               "Natural",
+               "Age at first birth",
+               "  Nulliparous",
+               "  $\\leq 20$",
+               "  21-24",
+               "  25-29",
+               "  30-55",
+               "Ethnicity",
+               "African ancestry",
+               "Asian",
+               "European ancestry",
+               "Other",
+               "Menopausal hormone therapy (at baseline)",
+               "Breast Cancers"
+               )
+
+t.tot
+
+# see https://cran.r-project.org/web/packages/kableExtra/vignettes/awesome_table_in_html.html
+
+```
+
+
+
+```{r, results='markup'}
+
+#dat = t.tot[c(5,1:3)]
+#names(dat)[5]="Missing"
+#dat <- sapply(dat, as.character) # since your values are `factor`
+dat = t.tot
+dat[is.na(dat)] = ""
+dat[dat=="NA [NA, NA]"] = ""
+dat[dat=="0 (NaN)"] = ""
+dat[dat=="0 (0)"] = ""
+
+class(dat)
+head(t(dat))
+
+#rownames(dat) = dat$vars
+head(dat)
+dat
+
+#c2 = paste0("Total (n=", dat[1,2], ")")
+
+
+```
+
+```{r}
+
+save(dat, file="table1-sub.RData")
+dim(dat)
+dat
+dim(t(dat))
+
+```
+
+## Table 
+
+```{r,  results='markup', eval=T}
+
+load("table1-sub.RData")
+#colnames(dat)
+dim1 = dim(dat)[2]-2
+
+newdat = dat[,c(dim(dat)[2],1:dim1)]
+colnames(newdat)[1] = ""
+
+kable(newdat, 
+      row.names=F,
+      booktabs=T,
+      escape=F,
+      linesep = "",
+      digits=1,
+       align=c('l', rep('c', 2), 'l')) %>%
+  kable_styling(latex_options = c("scale_down", "striped"), full_width = F) %>%
+  add_indent(c(10:13, 15:19, 21:24 )) %>%
+  column_spec(1, width = "9em") %>%
+  column_spec(2:dim1, width = "6em") %>%
+  footnote(alphabet = c("All age variables are in year units and continuous variables are characterized by median [interquartile range]."),
+           threeparttable = T) %>%
+  landscape()
+
+```
+

@@ -1,0 +1,705 @@
+---
+title: "BMI HR by menopause status -- table with HR estimates with time since study entry (instead of age as time scale)."
+date: '2022-08-05'
+output: 
+  html_document:
+    toc: true # table of content true
+    toc_depth: 3  # upto three depths of headings (specified by #, ## and ###)
+    number_sections: true  ## if you want number sections at each table header
+    theme: united  # many options for theme, this one is my favorite.
+    highlight: tango  # specifies the syntax highlighting style
+editor_options: 
+  chunk_output_type: console
+---
+
+Note: this figures and models are from the sample-bmi-time-dept.Rmd file.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      results="hide",
+                      eval=T) #only set to eval=T for new data,otherwise takes time to run
+
+options(knitr.kable.NA = '')
+
+```
+
+
+```{r, eval=T, include=F}
+
+library(ggplot2)
+theme_set(theme_bw())
+require(cowplot)
+require(scales)
+require(pammtools)
+require(dplyr)
+library(tidyr)
+library(kableExtra)
+require(data.table)
+
+```
+
+
+```{r, eval=T}
+# R on slurm is saving the environment from previous run. Remove all objects from prior runs to clear up memory so I can run this script.
+rm(list=ls()) 
+gc()
+
+```
+
+
+```{r}
+
+Set1 <- RColorBrewer::brewer.pal(9, "Set1") # note: no RColorBrewer installed on server. Used values I got from local drive
+#Set1 =  c("#E41A1C", "#377EB8", "#4DAF4A", "#984EA3", "#FF7F00", "#FFFF33", "#A65628", "#F781BF")
+
+```
+
+```{r, eval=T, results="markup"}
+# check data
+
+load(file="bmidat-pamm.RData") # df.ped
+
+head(df.ped,20)
+head(df.ped[!df.ped$meno.cause.t.f=="Premenopausal",],20)
+ 
+summary(df.ped$tstart)
+
+df.ped %>% 
+  group_by(meno.cause.t.f) %>% 
+  summarise(min = min(tstart),
+            med = median(tstart),
+            max = max(tstart))
+names(df.ped)
+summary(df.ped$bmi.age.orig)
+dim(df.ped)
+
+df.ped2  = df.ped %>%
+  filter(tstart>0 & tend<11)
+dim(df.ped2)
+
+
+
+```
+
+
+```{r, eval=T, results='markup'}
+
+
+load(file="bmi-time2.RData") # nat.1, ov.1, pre.1, surg.1 objects from sample-bmi-time-dept-analyses2.Rmd, primary analyses
+# rename objects because each of the three files have the same object names (but different data)
+nat.v1 = nat.1; ov.v1 = ov.1; pre.v1 = pre.1; surg.v1 = surg.1
+
+# load(file="test.RData") # surg.1 for debugging
+# # object.size(surg.1)
+# surg.v1 = surg.1
+
+```
+
+
+```{r, eval=F, results="markup"}
+object.size(pre.v1)
+object.size(ov.v1)
+
+dat.size = data.frame(objectnum=1:length(pre.v1), 
+                      num.size = sapply(pre.v1, object.size),
+                      size=sapply(pre.v1, function(x) format(object.size(x),
+                                                             standard="auto",
+                                                             units="Kb")))
+dat.size
+
+sum(dat.size$numsize)
+dat.size[order(-dat.size$num.size),] # what are the biggest objects?
+
+sapply(pre.v1, object.size)
+object.size(pre.v1[[7]])
+
+```
+
+```{r, eval=T}
+
+sort( sapply(ls(),function(x){object.size(get(x))})) 
+
+# make list of the data objects
+list.dat = list(nat.v1,
+                ov.v1, 
+                pre.v1,
+                surg.v1)
+
+names.meno = c(rep("nat", 1),
+               rep("ov", 1),
+               rep("pre", 1),
+               rep("surg", 1))
+names.meno
+
+names.analysis = rep("orig", 4)
+names.analysis
+
+names.list.dat = paste0(names.meno, ".", names.analysis); names.list.dat
+
+```
+
+
+
+```{r}
+
+# function to extract out parts of list from function run over list of objects representing type of menopausal person-time and type of analysis
+# source: https://stackoverflow.com/questions/43014782/how-to-get-the-nth-element-of-each-item-of-a-list-which-is-itself-a-vector-of-u
+
+fun1 <- function(lst, n){
+         sapply(lst, `[`, n)
+}
+
+```
+
+
+```{r}
+
+# Extract out 12 element from each data object -- the regression analyses summary object (gam.summary) with constant BMI (with time-dependent BMI covariate)
+
+# extract test of pooled models from list, 3rd item from each list (based on return part of function above)
+models = fun1(list.dat, 12)
+
+# check data for one model
+models[[1]]
+models[[1]]$p.coeff["bmi"]
+models[[1]]$se["bmi"]
+
+
+names(models)
+names(models) = names.list.dat # make names
+
+models.coef = lapply(names(models), function(nm) {
+  
+ #nm = 'surg.orig' # debug
+  x = models[[nm]]
+  coef = x$p.coeff["bmi"]
+  se   = x$se["bmi"]
+  lci = coef - 1.96*se
+  uci = coef + 1.96*se
+  
+  return(data.frame(name = nm,
+                    coef=coef,
+                    se = se,
+                    lci=lci,
+                    uci=uci,
+                    coef.ci = paste0(formatC(round(exp(coef), 2), format='f', digits=2),
+                                     " (",
+                                     formatC(round(exp(lci), 2), format='f', digits=2),
+                                     ", ",
+                                     formatC(round(exp(uci), 2), format='f', digits=2),
+                                     ")")))
+  
+}) # get coefficients from models
+
+
+models.dat = data.frame(models.coef %>% bind_rows()) # unlist models to get consolidated data frame of coefficients
+
+models.dat
+
+```
+
+
+```{r, results="markup"}
+
+# Extract out 14th element from each data object -- the regression analyses summary object (gam.summary) with linear time-dept BMI (with time-dependent BMI covariate)
+
+models2 = fun1(list.dat, 14)
+
+# check data for one model
+models2[[1]]
+models2[[1]]$p.coeff["bmi:t"]
+models2[[1]]$se["bmi:t"]
+exp(models2[[1]]$p.coeff["bmi"])
+exp(models2[[2]]$p.coeff["bmi"])
+exp(models2[[3]]$p.coeff["bmi"])
+exp(models2[[4]]$p.coeff["bmi"])
+
+names(models2)
+names(models2) = names.list.dat # make names
+
+sapply(models2, function(x) is.na(x$p.coeff["bmi:t"]))
+sapply(models2, function(x) is.na(x$se["bmi:t"]))
+
+models2.coef = lapply(names(models2), function(nm) {
+  
+ # nm = 'surg.orig' # debug
+  x = models2[[nm]]
+  
+  # information for slope
+  coef = x$p.coeff["bmi:t"]
+  se   = x$se["bmi:t"]
+  lci = coef - 1.96*se
+  uci = coef + 1.96*se
+  
+  # information for intercept
+  coef0 = x$p.coeff["bmi"]
+  se0   = x$se["bmi"]
+  lci0 = coef0 - 1.96*se0
+  uci0 = coef0 + 1.96*se0
+
+  n = x$n
+  
+  return(data.frame(name = nm,
+                    coef=coef,
+                    n=n,
+                    se = se,
+                    lci=lci,
+                    uci=uci,
+                    coef.ci = paste0(formatC(round(exp(coef), 2), format='f', digits=2),
+                                     " (",
+                                     formatC(round(exp(lci), 2), format='f', digits=2),
+                                     ", ",
+                                     formatC(round(exp(uci), 2), format='f', digits=2),
+                                     ")"),
+                    coef.ci0 = paste0(formatC(round(exp(coef0), 2), format='f', digits=2),
+                                     " (",
+                                     formatC(round(exp(lci0), 2), format='f', digits=2),
+                                     ", ",
+                                     formatC(round(exp(uci0), 2), format='f', digits=2),
+                                     ")")))
+  
+}) # get coefficients from models2
+
+models2.dat = data.frame(models2.coef %>% bind_rows()) # unlist models2 to get consolidated data frame of coefficients
+
+models2.dat
+
+
+```
+
+```{r}
+# extract out 8th object from list, term.df2.update, which provides data for plotted HR estimates and ci for the spline model
+
+dat.fig = fun1(list.dat, 8)
+names(dat.fig) = names.list.dat # make names
+
+# attach name to each data frame in list so can identify the menopause type
+dat.fig.names = lapply(names(dat.fig), function(nm) {
+  x = dat.fig[[nm]]
+  x$name = nm
+  x$coef.ci = with(x, paste0(formatC(round(exp(fit), 2), format='f', digits=2),
+                                     " (",
+                                     formatC(round(exp(ci_lower), 2), format='f', digits=2),
+                                     ", ",
+                                     formatC(round(exp(ci_upper), 2), format='f', digits=2),
+                                     ")"))
+  return(x)
+})
+
+dat.fig.combine = data.frame(dat.fig.names %>% bind_rows()) # unlist dat.fig object to get consolidated data frame of estimates used for each of the menopausal groups 
+
+dim(dat.fig.combine)
+head(dat.fig.combine)
+
+# Convert the data frame from long to wide by transform into into columns by age and keeping menopause status
+names(dat.fig.combine)
+dat.fig.combine$tstart = round(dat.fig.combine$tstart, 2)
+dat.fig.combine$tend = round(dat.fig.combine$tend, 2)
+head(dat.fig.combine)
+
+table(dat.fig.combine$tstart)
+
+dat.fig.wide = unique(dat.fig.combine) %>%
+  select(tstart, name, coef.ci) %>%
+  pivot_wider(names_from=tstart, values_from=coef.ci) #%>%
+  #select(name, `1.82`, `4.11`, `5.48`, `8.35`) %>%
+  #rename("est-1.82"=`1.82`, "est-4.11"=`4.11`, "est-5.48"=`5.48`, "est-8.35" = `8.35`)
+
+dat.fig.wide
+
+```
+
+```{r}
+
+# extract out the 14th object, linear bmi hr change model.
+dat.linear = fun1(list.dat, 14)
+names(dat.linear) = names.list.dat # make names
+dat.linear[[1]]
+
+```
+
+
+```{r, results="markup"}
+
+# Extract out 15th element from each data object -- the number of cases and person-years
+
+
+py.dat = fun1(list.dat, 15)
+
+# check data for one model
+py.dat[[1]]
+
+names(py.dat)
+names(py.dat) = names.list.dat # make names
+
+py.dat2 = lapply(names(py.dat), function(nm) {
+  
+ # nm = 'surg.orig' # debug
+  x = py.dat[[nm]]
+  n = x$n
+  py = x$py
+
+  return(data.frame(name = nm,
+                    n=n,
+                    py=py))
+                    
+}) # get coefficients from models2
+
+
+py.dat3 = data.frame(py.dat2 %>% bind_rows()) # unlist models2 to get consolidated data frame of number of cases and py
+
+py.dat3
+
+```
+
+```{r}
+
+# Extract out 1st element from each data object -- the deviance tests for the three models
+
+# the table has xx rows corresponding to  anova(pam.strat, pam2, pam4, pam3, test="Chisq")
+# pam.strat  is the null model (no covariates),
+# pam2 is constant bmi
+# pam 4 is time dependent bmi coefficient with spline fit
+# pam 3 is linear change in BMI coefficient over time
+
+tests = fun1(list.dat, 1)
+
+# check data for one model
+tests[[1]]
+tests[[3]]
+tests
+dat = data.frame(tests[[1]])
+dat
+
+df.diff = dat[2,1] - dat[1,1]
+dev.diff = dat[2,2] - dat[1,2]
+dev.diff
+
+pchisq(abs(dev.diff), abs(df.diff), lower.tail=F)
+
+# Get chi sq for spline vs constant BMI model
+
+df.diff = abs(dat[4,1] - dat[2,1])
+dev.diff = abs(dat[4,2] - dat[2,2])
+pchisq(dev.diff, df.diff, lower.tail=F)
+
+names(tests) = names.list.dat # make names
+
+models.test = lapply(names(tests), function(nm) {
+  
+  # nm = 'surg.orig' # debug
+  # nm = 'nat.orig'
+  dat = data.frame(tests[[nm]])
+
+  # Get chi sq for linear vs constant BMI model
+  # df.diff = abs(dat[3,1] - dat[2,1])
+  # dev.diff = abs(dat[3,2] - dat[2,2])
+  # p.chi = pchisq(dev.diff, df.diff, lower.tail=F)
+  
+  # Get chi sq for constant BMI model vs no BMI in model
+  return(p.chi = formatC(round(dat[2,5], 3), format='f', digits=3))
+  
+}) 
+
+p.vals = unlist(models.test); p.vals
+models.dat$p.vals = p.vals
+
+# double check constant vs null model
+# =================================
+
+check.test1 = lapply(names(tests), function(nm) {
+
+  # nm = 'surg.orig' # debug
+  # nm = 'pre.orig' # debug
+  # nm = 'nat.orig' # debug
+  dat = data.frame(tests[[nm]]); dat
+  
+  df.diff = abs(dat[2,1] - dat[1,1]); df.diff
+  dev.diff = abs(dat[2,2] - dat[1,2]); dev.diff
+  p.diff= pchisq(dev.diff, df.diff, lower.tail=F); p.diff
+
+  # Get chi sq for linear vs constant BMI model
+  return(p.chi = formatC(round(p.diff, 3), format='f', digits=3))
+  
+}) # get coefficients from models
+
+p.vals.check = unlist(check.test1); p.vals.check
+
+
+# get p-value for deviance test comparing linear to constant bmi (4th row to 2nd)
+# ============================================
+
+models.test2 = lapply(names(tests), function(nm) {
+
+  # nm = 'surg.orig' # debug
+  # nm = 'pre.orig' # debug
+  # nm = 'nat.orig' # debug
+  dat = data.frame(tests[[nm]])
+  
+  df.diff = abs(dat[4,1] - dat[2,1]); df.diff
+  dev.diff = abs(dat[4,2] - dat[2,2]); dev.diff
+  p.diff= pchisq(dev.diff, df.diff, lower.tail=F); p.diff
+
+  # Get chi sq for linear vs constant BMI model
+  return(p.chi = formatC(round(p.diff, 3), format='f', digits=3))
+  
+}) # get coefficients from models
+
+p.vals2 = unlist(models.test2); p.vals2
+
+# If the p-value is missing -- the diff df are 0 -- make p-value=1
+p.vals2[p.vals2 == "  NA"] = "1.000"
+p.vals2
+
+models.dat$p.vals2 = p.vals2
+
+
+
+# get p-value for deviance test comparing spline to linear bmi (3th row to 4nd)
+# ============================================
+
+models.test3 = lapply(names(tests), function(nm) {
+
+  # nm = 'surg.orig' # debug
+  # nm = 'pre.orig' # debug
+  # nm = 'nat.orig' # debug
+  dat = data.frame(tests[[nm]])
+  
+  df.diff = abs(dat[3,1] - dat[4,1]); df.diff
+  dev.diff = abs(dat[3,2] - dat[4,2]); dev.diff
+  p.diff= pchisq(dev.diff, df.diff, lower.tail=F); p.diff
+
+  # Get chi sq for linear vs constant BMI model
+  return(p.chi = formatC(round(p.diff, 3), format='f', digits=3))
+  
+}) # get coefficients from models
+
+p.vals3 = unlist(models.test3); p.vals3
+
+# If the p-value is missing -- the diff df are 0 -- make p-value=1
+p.vals2[p.vals2 == "  NA"] = "1.000"
+p.vals2
+
+models.dat$p.vals2 = p.vals2
+
+# get p-value for deviance test comparing spline to linear bmi model
+# ============================================
+# 
+# models.test2 = lapply(names(tests), function(nm) {
+# 
+#   # nm = 'surg.orig' # debug
+#   # nm = 'pre.orig' # debug
+#   # nm = 'nat.orig' # debug
+#   dat = data.frame(tests[[nm]])
+# 
+#   # Get chi sq for linear vs constant BMI model
+#   return(p.chi = formatC(round(dat[3,5], 3), format='f', digits=3))
+#   
+# }) # get coefficients from models
+# 
+# p.vals2 = unlist(models.test2); p.vals2
+# 
+# # If the p-value is missing -- the diff df are 0 -- make p-value=1
+# p.vals2[p.vals2 == "  NA"] = "1.000"
+# p.vals2
+# 
+# models.dat$p.vals2 = p.vals2
+
+
+```
+
+```{r}
+
+models2.dat = within(models2.dat, {
+  meno = ifelse(grepl("nat", name, fixed=T), "Natural",
+                ifelse(grepl("ov", name, fixed=T), "Ovarian",
+                       ifelse(grepl("pre", name, fixed=T), "Premenopausal",
+                              ifelse(grepl("surg", name, fixed=T), "Hysterectomy without bilateral oophorectomy", NA))))
+  
+  analysis = ifelse(grepl(".orig", name, fixed=T), "orig",
+                          ifelse(grepl(".early", name, fixed=T), "early",
+                                       ifelse(grepl(".hrt", name, fixed=T),"hrt", NA)))
+})
+
+models2.dat
+
+models.dat = within(models.dat, {
+  meno = ifelse(grepl("nat", name, fixed=T), "Natural",
+                ifelse(grepl("ov", name, fixed=T), "Ovarian",
+                       ifelse(grepl("pre", name, fixed=T), "Premenopausal",
+                              ifelse(grepl("surg", name, fixed=T), "Hysterectomy without bilateral oophorectomy", NA))))
+  
+  analysis = ifelse(grepl(".orig", name, fixed=T), "orig",
+                          ifelse(grepl(".early", name, fixed=T), "early",
+                                       ifelse(grepl(".hrt", name, fixed=T),"hrt", NA)))
+})
+
+models.dat
+
+
+py.dat3 = within(py.dat3, {
+  meno = ifelse(grepl("nat", name, fixed=T), "Natural",
+                ifelse(grepl("ov", name, fixed=T), "Ovarian",
+                       ifelse(grepl("pre", name, fixed=T), "Premenopausal",
+                              ifelse(grepl("surg", name, fixed=T), "Hysterectomy without bilateral oophorectomy", NA))))
+  
+  analysis = ifelse(grepl(".orig", name, fixed=T), "orig",
+                          ifelse(grepl(".early", name, fixed=T), "early",
+                                       ifelse(grepl(".hrt", name, fixed=T),"hrt", NA)))  
+})
+
+py.dat3
+
+
+dat.fig.wide = within(dat.fig.wide, {
+  meno = ifelse(grepl("nat", name, fixed=T), "Natural",
+                ifelse(grepl("ov", name, fixed=T), "Ovarian",
+                       ifelse(grepl("pre", name, fixed=T), "Premenopausal",
+                              ifelse(grepl("surg", name, fixed=T), "Hysterectomy without bilateral oophorectomy", NA))))
+  
+  analysis = ifelse(grepl(".orig", name, fixed=T), "orig",
+                          ifelse(grepl(".early", name, fixed=T), "early",
+                                       ifelse(grepl(".hrt", name, fixed=T),"hrt", NA)))  
+})
+
+dat.fig.wide
+
+```
+
+
+```{r}
+
+# add linear BMI hr change + intercept to table
+
+dat.dt = data.table(models.dat)
+setkey(dat.dt, meno, analysis)
+
+dat2.dt = data.table(models2.dat) %>% 
+  select(meno, analysis, coef.ci, coef.ci0) %>%
+  rename(coef.ci2 = coef.ci)
+setkey(dat2.dt, meno, analysis)
+
+py.dat3.dt = data.table(py.dat3) 
+setkey(py.dat3.dt, meno, analysis)
+
+# source: https://stackoverflow.com/questions/34598139/left-join-using-data-table
+models.dat.update = dat.dt[dat2.dt]
+models.dat.update
+
+models.dat.update2. = models.dat.update[py.dat3.dt]
+
+```
+
+
+```{r}
+# add/merge point estimates from spline model 
+
+dat.fig.wide.dt = data.table(dat.fig.wide) 
+setkey(dat.fig.wide.dt, meno, analysis)
+
+dat.fig.wide.dt
+
+
+models.dat.update2 = models.dat.update2.#[dat.fig.wide.dt]
+models.dat.update2
+
+```
+
+
+```{r, results="markup"}
+# now make table with regression results for BMI HR
+
+levels(factor(models.dat.update2$meno))
+# models.dat.update$meno = factor(models.dat.update$meno, 
+#                  levels = c("nat", "ov", "surg", "pre"), # change ordering
+#                  labels = c("Natural",
+#                             "Ovarian",
+#                             "Hysterectomy without bilateral oophorectomy",
+#                             "Premenopausal"))
+# levels(factor(models.dat.update$meno))
+
+models.dat.update2 = models.dat.update2[order(models.dat.update2$meno),]
+
+models.dat.update2
+
+```
+
+```{r, eval=T, results="markup"}
+
+t2 = models.dat.update2 %>%
+  select(coef.ci, p.vals, coef.ci0, coef.ci2, p.vals2, meno, n, py, analysis) %>% #, est.45, est.50, est.54)
+  pivot_wider(names_from=analysis, 
+              values_from = c("coef.ci", "p.vals", "coef.ci0", "coef.ci2", "p.vals2", "n", "py"))#,
+#                              "est.45", "est.50", "est.54"))
+t2
+names(t2)
+
+```
+
+
+```{r, results="markup", eval=T}
+
+kable(t2[c("meno",
+           "n_orig",
+           "py_orig",
+           "coef.ci_orig",
+           'p.vals_orig',
+           "coef.ci0_orig",
+           "coef.ci2_orig",
+           'p.vals2_orig'
+           # "est.45_orig",
+           # "est.50_orig",
+           # "est.54_orig"
+           )])
+
+kable(t2[c("meno",
+           "n_orig",
+           "py_orig",
+           "coef.ci_orig",
+           'p.vals_orig',
+           "coef.ci0_orig",
+           "coef.ci2_orig",
+           'p.vals2_orig'
+           # "est.45_orig",
+           # "est.50_orig",
+           # "est.54_orig"
+           )],
+      booktabs=T, 
+      col.names = c("Menopause status", 
+                    "n, cases", 
+                    "person-years",
+                    rep(c("HR (95\\% CI)", 
+                          "p-value$^b$", 
+                          "linear HR intercept term$^c$ (95\\% CI)",
+                          "linear HR slope term$^d$ (95\\% CI)",
+                          "p-value$^e$"), 1)
+#                    "HR at age 45",
+#                    "HR at age 50",
+#                    "HR at age 54"
+                    ),
+      escape=F,
+#      longtable=F,
+      row.names=F,
+      caption="BMI breast cancer hazard ratios$^a$ by model type") %>%
+  column_spec(1, width = "10em") %>%
+  column_spec(c(2,3), width = "5em") %>%
+#  column_spec(c(4,6,8), width = "7em") %>%
+#  column_spec(c(5,7), width = "5em") %>%
+  add_header_above(c(" " = 3, 
+                     "Model 1: Constant BMI" = 2,
+                     "Model 2: Linear BMI" = 3)) %>%#,
+#                     "Model 3: HR estimates based on spline model" = 3)) %>%
+  kable_styling(font_size=12) %>%  #latex_options="scale_down"
+  add_footnote(c("All analyses are stratified by cohort.",
+                 "p-value for Chi-square test for difference from null model (no BMI term).",
+                 "HR at baseline.",
+                 "Ratio of HR for a one-year change in age-time.",
+                 "p-value for Chi-square test for difference from constant BMI model."),
+               escape=F,
+#               notation="none",
+               threeparttable = TRUE)
+
+save(t2, file="t2.RData")
+
+```
+
